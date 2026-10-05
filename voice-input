@@ -1,0 +1,57 @@
+#!/bin/sh
+
+set -eu
+
+state_dir="${XDG_RUNTIME_DIR:?}/voice-input"
+audio="$state_dir/input.wav"
+pid_file="$state_dir/recording.pid"
+model="${XDG_DATA_HOME:-$HOME/.local/share}/whisper/ggml-medium.bin"
+whisper_cli="$HOME/src/whisper.cpp/build/bin/whisper-cli"
+text_base="$state_dir/transcript"
+hud_status="$state_dir/hud-status"
+
+mkdir -p "$state_dir"
+
+if [ -f "$pid_file" ]; then
+  pid=$(cat "$pid_file")
+  rm -f "$pid_file"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+
+  if [ ! -f "$model" ]; then
+    exit 1
+  fi
+
+  printf '%s transcribing\n' "$$" > "$hud_status"
+  trap 'rm -f "$hud_status"' 0
+  rm -f "$text_base.txt"
+  "$whisper_cli" -t 12 -m "$model" -f "$audio" -l ja -nt -otxt -of "$text_base" >/dev/null 2>&1
+
+  if [ ! -s "$text_base.txt" ]; then
+    exit 1
+  fi
+
+  transcript=$(tr '\n' ' ' < "$text_base.txt")
+  wl-copy "$transcript"
+
+  # IME が有効だと wtype の入力が SKK に食われるので、入力中だけ切る
+  ime_state=$(fcitx5-remote 2>/dev/null || echo 0)
+  if [ "$ime_state" = 2 ]; then
+    fcitx5-remote -c
+    sleep 0.05
+  fi
+  wtype "$transcript"
+  if [ "$ime_state" = 2 ]; then
+    sleep 0.05
+    fcitx5-remote -o
+  fi
+  exit 0
+fi
+
+if [ ! -x "$whisper_cli" ]; then
+  exit 1
+fi
+
+rm -f "$audio" "$text_base.txt"
+pw-record --rate 16000 --channels 1 "$audio" >/dev/null 2>&1 &
+printf '%s\n' "$!" > "$pid_file"

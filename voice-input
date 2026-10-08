@@ -34,7 +34,7 @@ lower_volume() {
   [ "$#" -ge 2 ] || return
   [ "${3:-}" != '[MUTED]' ] || return
   volume=$2
-  lower=$(awk -v volume="$volume" 'BEGIN { printf "%.2f", volume * 0.5 }')
+  lower=$(awk -v volume="$volume" 'BEGIN { printf "%.2f", volume * 0.2 }')
   printf '%s %s\n' "$sink_id" "$volume" > "$volume_file"
   wpctl set-volume "$sink_id" "$lower" >/dev/null 2>&1 || rm -f "$volume_file"
 }
@@ -58,7 +58,27 @@ if [ -f "$pid_file" ]; then
   done
 
   printf '%s transcribing\n' "$$" > "$hud_status"
-  trap 'rm -f "$hud_status"; "$hud_status_cmd" clear voice-input >/dev/null 2>&1 || true' 0
+  typing_submap=0
+  restore_ime=0
+  cleanup() {
+    if [ "$typing_submap" = 1 ]; then
+      hyprctl dispatch 'hl.dsp.submap("reset")' >/dev/null 2>&1 || true
+    fi
+    if [ "$restore_ime" = 1 ]; then
+      fcitx5-remote -o >/dev/null 2>&1 || true
+    fi
+    rm -f "$hud_status"
+    "$hud_status_cmd" clear voice-input >/dev/null 2>&1 || true
+  }
+  trap cleanup 0
+  trap 'exit 1' 1 2 15
+  hyprctl dispatch 'hl.dsp.submap("voice_input_typing")' >/dev/null
+  typing_submap=1
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    [ "$(hyprctl submap)" = voice_input_typing ] && break
+    sleep 0.01
+  done
+  [ "$(hyprctl submap)" = voice_input_typing ] || exit 1
   rm -f "$text_base.txt"
   if ! curl --fail --silent --show-error --connect-timeout 1 --max-time 300 \
     -F "file=@$audio;type=audio/wav" -F 'language=ja' \
@@ -83,12 +103,14 @@ if [ -f "$pid_file" ]; then
   ime_state=$(fcitx5-remote 2>/dev/null || echo 0)
   if [ "$ime_state" = 2 ]; then
     fcitx5-remote -c
+    restore_ime=1
     sleep 0.05
   fi
   printf '%s' "$transcript" | wtype -
   if [ "$ime_state" = 2 ]; then
     sleep 0.05
     fcitx5-remote -o
+    restore_ime=0
   fi
   exit 0
 fi

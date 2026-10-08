@@ -1,0 +1,9 @@
+[Unit]
+Description=Whisper server for voice-input
+
+[Service]
+ExecStart=%h/src/whisper.cpp/build-cuda/bin/whisper-server -m %h/.local/share/whisper/ggml-medium.bin -l ja -nt -t 4 --host 127.0.0.1 --port 8082
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

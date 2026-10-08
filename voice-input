@@ -5,34 +5,79 @@ set -eu
 state_dir="${XDG_RUNTIME_DIR:?}/voice-input"
 audio="$state_dir/input.wav"
 pid_file="$state_dir/recording.pid"
-model="${XDG_DATA_HOME:-$HOME/.local/share}/whisper/ggml-medium.bin"
+cpu_model="${XDG_DATA_HOME:-$HOME/.local/share}/whisper/ggml-small.bin"
 whisper_cli="$HOME/src/whisper.cpp/build/bin/whisper-cli"
+whisper_url="http://127.0.0.1:8082/inference"
+hud="$HOME/.local/bin/hud"
+hud_status_cmd="$HOME/.local/bin/hud-status"
 text_base="$state_dir/transcript"
 hud_status="$state_dir/hud-status"
+volume_file="$state_dir/sink-volume"
+
+restore_volume() {
+  if [ -f "$volume_file" ]; then
+    sink_id=
+    volume=
+    read -r sink_id volume < "$volume_file" || true
+    rm -f "$volume_file"
+    if [ -n "$sink_id" ] && [ -n "$volume" ]; then
+      wpctl set-volume "$sink_id" "$volume" >/dev/null 2>&1 || true
+    fi
+  fi
+}
+
+lower_volume() {
+  sink_id=$(wpctl inspect @DEFAULT_AUDIO_SINK@ 2>/dev/null | awk 'NR == 1 { gsub(/,/, "", $2); print $2 }') || return
+  [ -n "$sink_id" ] || return
+  volume_state=$(wpctl get-volume "$sink_id" 2>/dev/null) || return
+  set -- $volume_state
+  [ "$#" -ge 2 ] || return
+  [ "${3:-}" != '[MUTED]' ] || return
+  volume=$2
+  lower=$(awk -v volume="$volume" 'BEGIN { printf "%.2f", volume * 0.5 }')
+  printf '%s %s\n' "$sink_id" "$volume" > "$volume_file"
+  wpctl set-volume "$sink_id" "$lower" >/dev/null 2>&1 || rm -f "$volume_file"
+}
 
 mkdir -p "$state_dir"
 
+if [ -f "$pid_file" ] && ! kill -0 "$(cat "$pid_file")" 2>/dev/null; then
+  restore_volume
+  rm -f "$pid_file"
+fi
+
 if [ -f "$pid_file" ]; then
   pid=$(cat "$pid_file")
+  restore_volume
   rm -f "$pid_file"
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
-
-  if [ ! -f "$model" ]; then
-    exit 1
-  fi
+  for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.05
+  done
 
   printf '%s transcribing\n' "$$" > "$hud_status"
-  trap 'rm -f "$hud_status"' 0
+  trap 'rm -f "$hud_status"; "$hud_status_cmd" clear voice-input >/dev/null 2>&1 || true' 0
   rm -f "$text_base.txt"
-  "$whisper_cli" -t 12 -m "$model" -f "$audio" -l ja -nt -otxt -of "$text_base" >/dev/null 2>&1
+  if ! curl --fail --silent --show-error --connect-timeout 1 --max-time 300 \
+    -F "file=@$audio;type=audio/wav" -F 'language=ja' \
+    -F 'no_timestamps=true' -F 'response_format=text' \
+    "$whisper_url" -o "$text_base.txt" 2>"$state_dir/gpu.log" || [ ! -s "$text_base.txt" ]; then
+    "$hud" -s off --no-voice '音声入力: GPU処理失敗、CPUへ切替' >/dev/null 2>&1 || true
+    "$hud_status_cmd" set voice-input '音声入力: CPUで処理中' >/dev/null 2>&1 || true
+    if [ ! -f "$cpu_model" ] || [ ! -x "$whisper_cli" ]; then
+      exit 1
+    fi
+    "$whisper_cli" -t 12 -m "$cpu_model" -f "$audio" -l ja -nt -otxt -of "$text_base" >/dev/null 2>"$state_dir/cpu.log"
+  fi
 
   if [ ! -s "$text_base.txt" ]; then
     exit 1
   fi
 
   transcript=$(tr '\n' ' ' < "$text_base.txt")
-  wl-copy "$transcript"
+  printf '%s' "$transcript" | wl-copy
 
   # IME が有効だと wtype の入力が SKK に食われるので、入力中だけ切る
   ime_state=$(fcitx5-remote 2>/dev/null || echo 0)
@@ -40,7 +85,7 @@ if [ -f "$pid_file" ]; then
     fcitx5-remote -c
     sleep 0.05
   fi
-  wtype "$transcript"
+  printf '%s' "$transcript" | wtype -
   if [ "$ime_state" = 2 ]; then
     sleep 0.05
     fcitx5-remote -o
@@ -48,10 +93,8 @@ if [ -f "$pid_file" ]; then
   exit 0
 fi
 
-if [ ! -x "$whisper_cli" ]; then
-  exit 1
-fi
-
+restore_volume
+lower_volume
 rm -f "$audio" "$text_base.txt"
 pw-record --rate 16000 --channels 1 "$audio" >/dev/null 2>&1 &
 printf '%s\n' "$!" > "$pid_file"

@@ -61,7 +61,7 @@ if [ -f "$pid_file" ]; then
   printf '%s transcribing\n' "$$" > "$hud_status"
   typing_submap=0
   restore_ime=0
-  # shellcheck disable=SC2329 # trap から呼ぶ
+  # shellcheck disable=SC2317,SC2329 # trap から呼ぶ
   cleanup() {
     if [ "$typing_submap" = 1 ]; then
       hyprctl dispatch 'hl.dsp.submap("reset")' >/dev/null 2>&1 || true

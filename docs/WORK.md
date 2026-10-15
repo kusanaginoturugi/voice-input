@@ -21,6 +21,8 @@
 - README に `wf-recorder` のマイク音声付き録画例と `screenrec stop` による停止手順を追加。
 - 同じ約 11 秒の録音では、GPU medium が約 0.24 秒で「スモール」、CPU small が約 2.3 秒で「スモーリー」と認識。ユーザーは GPU 一括入力を実用上快適と評価。
 - 一括入力でも `SUPER+ESC` が誤発火したため、停止後の変換・文字入力中は Hyprland の `voice_input_typing` submap へ切り替え、終了時に戻す。GPU 成功、CPU 切替、`wtype` 失敗時の復帰を確認。
+- Arch Linux のパッケージ版 `whisper-cpp` と `ggml-cuda` が CUDA に対応したため、自前ビルドをやめて `/usr/bin/whisper-server`、`/usr/bin/whisper-cli` を使うよう変更。起動ログで RTX 4070 と `libggml-cuda.so` の読み込みを確認。
+- `shellcheck` と `bats` のテストを追加（`make test`）。テスト作成中に、出力がミュート中または既定の出力先がない場合に `set -e` で録音前に終了するバグを発見して修正。2026-10-15 にユーザーが実機でミュート中も録音できることを確認。
 
 ## 引き継ぎ
 

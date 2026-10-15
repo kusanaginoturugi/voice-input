@@ -15,20 +15,19 @@
 
 - Hyprland の `~/.config/hypr/binds-omarchy.lua` が `SUPER + H` に `voice-input` を割り当てている。
 - 実際に呼ばれるファイルは `~/.local/bin/voice-input`。このディレクトリの `voice-input` が編集用の原本。
-- 録音に `pw-record`、文字起こしにローカルの `whisper-server` を使う。GPU 側は `${XDG_DATA_HOME:-$HOME/.local/share}/whisper/ggml-medium.bin`、CPU への切替時は `ggml-small.bin` を使う。CPU 版 CLI は `~/src/whisper.cpp/build/bin/whisper-cli`。
+- 録音に `pw-record`、文字起こしにローカルの `whisper-server` を使う。GPU 側は `${XDG_DATA_HOME:-$HOME/.local/share}/whisper/ggml-medium.bin`、CPU への切替時は `ggml-small.bin` を使う。サーバーと CPU 版 CLI はパッケージ版の `/usr/bin/whisper-server` と `/usr/bin/whisper-cli`。
 - 出力音量の変更と復元には `wpctl` を使う。録音開始時の出力先と音量を保存するため、途中で既定の出力先を変更しても元の出力先へ戻す。
 - 結果の入力に `wl-copy`、`wtype`、`fcitx5-remote` を使う。
 
 ## CUDA 版 Whisper サーバー
 
-RTX 4070 では CUDA 版を別のビルドディレクトリに作る。既存の CPU 版ビルドはそのまま残す。
+Arch Linux のパッケージ版 `whisper-cpp` は CUDA に対応しているため、自分でビルドする必要はない。GPU 処理には ggml の CUDA バックエンド `ggml-cuda` も入れる。
 
 ```sh
-cmake -S ~/src/whisper.cpp -B ~/src/whisper.cpp/build-cuda \
-  -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES=89 \
-  -DGGML_CUDA=ON -DWHISPER_BUILD_SERVER=ON
-cmake --build ~/src/whisper.cpp/build-cuda -j 4
+sudo pacman -S whisper-cpp ggml-cuda
 ```
+
+`whisper-server` と `whisper-cli` が `/usr/bin` に入り、CUDA バックエンドは実行時に `/usr/lib/ggml/libggml-cuda.so` から読み込まれる。モデルは別途 `${XDG_DATA_HOME:-$HOME/.local/share}/whisper/` に `ggml-medium.bin` と `ggml-small.bin` を置く。
 
 このディレクトリで次を実行して user service を登録する。
 
@@ -46,7 +45,20 @@ curl --fail http://127.0.0.1:8082/health
 journalctl --user -u voice-input-whisper.service -b -n 50
 ```
 
-`/health` が `{"status":"ok"}` を返したら利用できる。GPU を使えているかはサーバーの起動ログで CUDA デバイスの認識を確認する。
+`/health` が `{"status":"ok"}` を返したら利用できる。GPU を使えているかはサーバーの起動ログで確認する。`ggml_cuda_init: found 1 CUDA devices` と `load_backend: loaded CUDA backend from /usr/lib/ggml/libggml-cuda.so` が出ていれば CUDA で動いている。
+
+## 参考: ソースからの CUDA ビルド
+
+パッケージ版が CUDA に対応する前は、whisper.cpp を自分でビルドしていた。現在は不要だが、パッケージ版が使えない場合の参考として残す。RTX 4070 向けに CUDA 版を別のビルドディレクトリに作り、CPU 版ビルド（`~/src/whisper.cpp/build`）はそのまま残していた。
+
+```sh
+cmake -S ~/src/whisper.cpp -B ~/src/whisper.cpp/build-cuda \
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES=89 \
+  -DGGML_CUDA=ON -DWHISPER_BUILD_SERVER=ON
+cmake --build ~/src/whisper.cpp/build-cuda -j 4
+```
+
+この場合は service の `ExecStart` を `%h/src/whisper.cpp/build-cuda/bin/whisper-server`、`voice-input` の `whisper_cli` を `$HOME/src/whisper.cpp/build/bin/whisper-cli` に変える。
 
 ## 随時入力をやめた理由
 

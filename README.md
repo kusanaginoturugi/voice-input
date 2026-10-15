@@ -105,6 +105,23 @@ wf-recorder -c h264_nvenc -g "$(slurp)" \
 
 終了は別の端末から `screenrec stop`。録画中の音量は元の20%になるが、再生音がマイクに届けば動画にも入る。実演では音声入力HUDと、認識した文章が入力先に現れるところまで記録できる。
 
+## テスト
+
+`shellcheck` と `bats` を使う。
+
+```sh
+sudo pacman -S --needed shellcheck bats
+make test
+```
+
+`make test` は `shellcheck voice-input` の後に `tests/voice-input.bats` を実行する。テストでは `wpctl`、`pw-record`、`hyprctl`、`curl`、`whisper-cli`、`wl-copy`、`wtype`、`fcitx5-remote`、`hud`、`hud-status` を偽のコマンドに置き換える。実際の録音、GPU、Hyprland、入力先は使わない。`HOME` と `XDG_RUNTIME_DIR` もテストごとの一時ディレクトリに向けるので、実行中の音声入力の状態には触れない。CPU 版 CLI のパスは環境変数 `VOICE_INPUT_WHISPER_CLI` で差し替える（既定は `/usr/bin/whisper-cli`）。
+
+主に確かめている内容:
+
+- 録音開始時に出力音量を20%に下げ、停止時に戻す。ミュート中や既定の出力先がない場合も録音は始まる。
+- GPU が失敗するか空の結果を返したら、HUD に表示して CPU で再処理する。
+- 文字入力は `voice_input_typing` submap の中で行い、失敗しても submap、IME、状態ファイルを元に戻す。
+
 ## 変更の反映
 
 このディレクトリのスクリプトを編集したら、実行先へコピーする。

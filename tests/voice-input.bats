@@ -143,7 +143,7 @@ line_of() {
   MOCK_VOLUME='Volume: 0.80 [MUTED]'
   run "$SCRIPT"
   [ "$status" -eq 0 ]
-  ! grep -q '^wpctl set-volume' "$T/calls"
+  ! grep -q '^wpctl set-volume' "$T/calls" || false
   [ ! -f "$state/sink-volume" ]
   [ -f "$state/recording.pid" ]
 }
@@ -175,12 +175,12 @@ MOCK
   start_fake_recording
   run "$SCRIPT"
   [ "$status" -eq 0 ]
-  ! kill -0 "$recorder" 2>/dev/null
+  ! kill -0 "$recorder" 2>/dev/null || false
   called 'wpctl set-volume 42 0.80'
   [ "$(cat "$T/typed")" = 'GPUの結果 ' ]
   [ "$(cat "$T/clipboard")" = 'GPUの結果 ' ]
-  ! grep -q '^whisper-cli' "$T/calls"
-  ! grep -q '^hud ' "$T/calls"
+  ! grep -q '^whisper-cli' "$T/calls" || false
+  ! grep -q '^hud ' "$T/calls" || false
 }
 
 @test "停止後は状態ファイルを消し、submap を元に戻す" {
@@ -224,7 +224,7 @@ MOCK
   start_fake_recording
   run "$SCRIPT"
   [ "$status" -eq 1 ]
-  ! called wtype
+  ! called wtype || false
   [ "$(cat "$T/submap")" = reset ]
   [ ! -f "$state/hud-status" ]
   called 'wpctl set-volume 42 0.80'
@@ -243,7 +243,7 @@ MOCK
   start_fake_recording
   run "$SCRIPT"
   [ "$status" -eq 0 ]
-  ! grep -q '^fcitx5-remote' "$T/calls"
+  ! grep -q '^fcitx5-remote' "$T/calls" || false
 }
 
 @test "入力に失敗しても IME と submap を元に戻す" {

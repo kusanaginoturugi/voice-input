@@ -114,7 +114,7 @@ sudo pacman -S --needed shellcheck bats
 make test
 ```
 
-`make test` は `shellcheck voice-input` の後に `tests/voice-input.bats` を実行する。テストでは `wpctl`、`pw-record`、`hyprctl`、`curl`、`whisper-cli`、`wl-copy`、`wtype`、`fcitx5-remote`、`hud`、`hud-status` を偽のコマンドに置き換える。実際の録音、GPU、Hyprland、入力先は使わない。`HOME` と `XDG_RUNTIME_DIR` もテストごとの一時ディレクトリに向けるので、実行中の音声入力の状態には触れない。CPU 版 CLI のパスは環境変数 `VOICE_INPUT_WHISPER_CLI` で差し替える（既定は `/usr/bin/whisper-cli`）。
+`make test` は `shellcheck voice-input` の後に `tests/voice-input.bats` を実行する。GitHub Actions（`.github/workflows/test.yml`）でも push と pull request のたびに同じ `make test` を Ubuntu 上で実行する。テストでは `wpctl`、`pw-record`、`hyprctl`、`curl`、`whisper-cli`、`wl-copy`、`wtype`、`fcitx5-remote`、`hud`、`hud-status` を偽のコマンドに置き換える。実際の録音、GPU、Hyprland、入力先は使わない。`HOME` と `XDG_RUNTIME_DIR` もテストごとの一時ディレクトリに向けるので、実行中の音声入力の状態には触れない。CPU 版 CLI のパスは環境変数 `VOICE_INPUT_WHISPER_CLI` で差し替える（既定は `/usr/bin/whisper-cli`）。
 
 主に確かめている内容:
 

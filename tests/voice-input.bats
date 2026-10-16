@@ -22,6 +22,7 @@ setup() {
   export MOCK_CURL=ok
   export MOCK_GPU_TEXT='GPUの結果'
   export MOCK_CPU_TEXT='CPUの結果'
+  export MOCK_CLI=ok
   export MOCK_IME=1
   export MOCK_WTYPE=ok
 
@@ -67,6 +68,10 @@ while [ "$#" -gt 0 ]; do
   [ "$1" = -of ] && base=$2
   shift
 done
+if [ "$MOCK_CLI" = oom ]; then
+  echo 'cudaMalloc failed: out of memory' >&2
+  exit 3
+fi
 printf '%s\n' "$MOCK_CPU_TEXT" > "$base.txt"
 EOF
   mock wl-copy <<'EOF'
@@ -216,6 +221,19 @@ MOCK
   [ "$status" -eq 0 ]
   grep -q '^whisper-cli ' "$T/calls"
   [ "$(cat "$T/typed")" = 'CPUの結果 ' ]
+}
+
+@test "VRAM 不足で whisper-cli も失敗したら HUD に表示し、何も入力しない" {
+  MOCK_CURL=fail
+  MOCK_CLI=oom
+  start_fake_recording
+  run "$SCRIPT"
+  [ "$status" -eq 1 ]
+  called 'hud -s off --no-voice 音声入力: VRAM不足で処理できません'
+  ! called wtype || false
+  [ "$(cat "$T/submap")" = reset ]
+  [ ! -f "$state/hud-status" ]
+  grep -q 'out of memory' "$state/cpu.log"
 }
 
 @test "CPU モデルがなければ何も入力せずに失敗し、後片付けはする" {

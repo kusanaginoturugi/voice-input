@@ -33,6 +33,7 @@
 - 2026-10-16: 2台目の gallsk（RTX 3060 12GB）へ導入。`whisper-cpp`、`shellcheck`、`bats` を pacman で入れ、モデルを Hugging Face の `ggerganov/whisper.cpp` から取得（sha256 一致を確認）。`~/.local/bin/voice-input` には 10/6 の初期版が残っていたので `voice-input.bak-20261006` に退避して更新。
 - gallsk では `llama-server` が VRAM を約 8.4GB 使っている。whisper-server（medium）は約 2.1GB で載り、テスト WAV の `/inference` が約 0.3 秒で応答。
 - パッケージ版 `whisper-cli` は `ggml-cuda` があると GPU を使う。VRAM が埋まっていると CPU 切替でも `cudaMalloc failed: out of memory` で落ちる。`-ng` なら CPU で通る（テスト WAV で約 2.8 秒）が、ユーザーは CPU は遅くて使わない方針なので付けていない。
+- VRAM 不足に気づけるよう、切替後の `whisper-cli` が失敗して `cpu.log` に `out of memory` があれば HUD に `音声入力: VRAM不足で処理できません` を出すようにした。gallsk 実機の OOM ログで文言が一致することを確認。
 
 ## 引き継ぎ
 

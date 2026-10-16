@@ -91,7 +91,13 @@ if [ -f "$pid_file" ]; then
     if [ ! -f "$cpu_model" ] || [ ! -x "$whisper_cli" ]; then
       exit 1
     fi
-    "$whisper_cli" -t 12 -m "$cpu_model" -f "$audio" -l ja -nt -otxt -of "$text_base" >/dev/null 2>"$state_dir/cpu.log"
+    if ! "$whisper_cli" -t 12 -m "$cpu_model" -f "$audio" -l ja -nt -otxt -of "$text_base" >/dev/null 2>"$state_dir/cpu.log"; then
+      # パッケージ版 whisper-cli も GPU を使うので、VRAM が埋まっていると落ちる
+      if grep -q 'out of memory' "$state_dir/cpu.log"; then
+        "$hud" -s off --no-voice '音声入力: VRAM不足で処理できません' >/dev/null 2>&1 || true
+      fi
+      exit 1
+    fi
   fi
 
   if [ ! -s "$text_base.txt" ]; then

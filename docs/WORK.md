@@ -5,7 +5,8 @@
 - [x] `whisper-cpp` を入れ、モデルを `~/.local/share/whisper/` に置く。
 - [x] `voice-input` と user service を配置し、GPU 推論を確認する。
 - [x] Hyprland の `SUPER + H` を voxtype から `voice-input` に切り替え、submap と `share_states = 0` を設定する。
-- [ ] 実機で `SUPER + H` から入力まで確認する。
+- [x] 切替後の `whisper-cli` も VRAM 不足で失敗したら HUD に表示する。
+- [ ] 家で実機確認する（`SUPER + H` から入力まで、VRAM 不足時の HUD 表示）。職場では音を出せないため未確認。
 
 ## 作業計画（2026-10-08）
 

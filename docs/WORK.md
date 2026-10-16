@@ -1,5 +1,12 @@
 # 作業計画・記録・引き継ぎ
 
+## 作業計画（2026-10-16: 2台目 gallsk への導入）
+
+- [x] `whisper-cpp` を入れ、モデルを `~/.local/share/whisper/` に置く。
+- [x] `voice-input` と user service を配置し、GPU 推論を確認する。
+- [x] Hyprland の `SUPER + H` を voxtype から `voice-input` に切り替え、submap と `share_states = 0` を設定する。
+- [ ] 実機で `SUPER + H` から入力まで確認する。
+
 ## 作業計画（2026-10-08）
 
 - [x] CUDA 版 Whisper サーバーを `127.0.0.1:8082` で常駐させる。
@@ -23,6 +30,9 @@
 - 一括入力でも `SUPER+ESC` が誤発火したため、停止後の変換・文字入力中は Hyprland の `voice_input_typing` submap へ切り替え、終了時に戻す。GPU 成功、CPU 切替、`wtype` 失敗時の復帰を確認。
 - Arch Linux のパッケージ版 `whisper-cpp` と `ggml-cuda` が CUDA に対応したため、自前ビルドをやめて `/usr/bin/whisper-server`、`/usr/bin/whisper-cli` を使うよう変更。起動ログで RTX 4070 と `libggml-cuda.so` の読み込みを確認。
 - `shellcheck` と `bats` のテストを追加（`make test`）。テスト作成中に、出力がミュート中または既定の出力先がない場合に `set -e` で録音前に終了するバグを発見して修正。2026-10-15 にユーザーが実機でミュート中も録音できることを確認。
+- 2026-10-16: 2台目の gallsk（RTX 3060 12GB）へ導入。`whisper-cpp`、`shellcheck`、`bats` を pacman で入れ、モデルを Hugging Face の `ggerganov/whisper.cpp` から取得（sha256 一致を確認）。`~/.local/bin/voice-input` には 10/6 の初期版が残っていたので `voice-input.bak-20261006` に退避して更新。
+- gallsk では `llama-server` が VRAM を約 8.4GB 使っている。whisper-server（medium）は約 2.1GB で載り、テスト WAV の `/inference` が約 0.3 秒で応答。
+- パッケージ版 `whisper-cli` は `ggml-cuda` があると GPU を使う。VRAM が埋まっていると CPU 切替でも `cudaMalloc failed: out of memory` で落ちる。`-ng` なら CPU で通る（テスト WAV で約 2.8 秒）が、ユーザーは CPU は遅くて使わない方針なので付けていない。
 
 ## 引き継ぎ
 
@@ -33,3 +43,4 @@
 - `~/.config/hypr/binds-omarchy.lua` に `voice_input_typing` submap と復帰用 `F12` を定義している。このファイルも本リポジトリ外。ユーザーの直後の試行では誤爆しなかった。
 - デモ録画用の `~/.local/bin/screenrec`、`~/.local/bin/hud-probe`、`~/.config/quickshell/cli-hud/shell.qml` も本リポジトリ外。HUD には録画時間と `ALT+Print` / `screenrec stop` を表示する。
 - `~/Videos/voice-input-demo4.mp4` はローカルの実演動画で、リポジトリには含めていない。
+- gallsk では Hyprland の設定が `~/.config/hypr/hyprland.lua` 1 本で、`SUPER + H`、`voice_input_typing` submap、`input.virtualkeyboard.share_states = 0` もここに書いた。変更前の状態は `~/.config/hypr/hyprland.lua.bak-before-voice-input`。voxtype はアンインストールしていない。

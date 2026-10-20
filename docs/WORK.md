@@ -1,5 +1,11 @@
 # 作業計画・記録・引き継ぎ
 
+## 作業計画（2026-10-20: GPU モデルの量子化）
+
+- [x] `whisper-quantize` で `ggml-medium.bin` を `q8_0` / `q5_0` に量子化し、VRAM・速度・日本語精度を比べる。
+- [x] whisper-server を `ggml-medium-q8_0.bin` に切り替える。
+- [ ] 実機の声で `q8_0` の認識精度を確認する。
+
 ## 作業計画（2026-10-16: 2台目 gallsk への導入）
 
 - [x] `whisper-cpp` を入れ、モデルを `~/.local/share/whisper/` に置く。
@@ -35,11 +41,12 @@
 - gallsk では `llama-server` が VRAM を約 8.4GB 使っている。whisper-server（medium）は約 2.1GB で載り、テスト WAV の `/inference` が約 0.3 秒で応答。
 - パッケージ版 `whisper-cli` は `ggml-cuda` があると GPU を使う。VRAM が埋まっていると CPU 切替でも `cudaMalloc failed: out of memory` で落ちる。`-ng` なら CPU で通る（テスト WAV で約 2.8 秒）が、ユーザーは CPU は遅くて使わない方針なので付けていない。
 - VRAM 不足に気づけるよう、切替後の `whisper-cli` が失敗して `cpu.log` に `out of memory` があれば HUD に `音声入力: VRAM不足で処理できません` を出すようにした。gallsk 実機の OOM ログで文言が一致することを確認。
+- 2026-10-20: gallsk（RTX 3060）で `ggml-medium.bin` を量子化して比較。モデルの VRAM は f16 1533MB / `q8_0` 823MB / `q5_0` 539MB。VOICEVOX で合成した日本語約 30 秒 × 2 話者で、処理時間は f16 約 1.8 秒 / `q8_0` 約 1.5 秒 / `q5_0` 約 1.4 秒。`q8_0` は f16 と出力が完全一致、`q5_0` は 1 話者の末尾だけ差があった。精度リスクが最小の `q8_0` をサーバーに採用。CPU 切替用の `ggml-small.bin` はそのまま。
 
 ## 引き継ぎ
 
 - 実行ファイルは `~/.local/bin/voice-input`。変更時は `README.md` の手順でコピーする。
-- GPU は `ggml-medium.bin`、CPU 切替時は `ggml-small.bin`。サーバーは user service で起動する。
+- GPU は `ggml-medium-q8_0.bin`（`ggml-medium.bin` から `whisper-quantize` で作成）、CPU 切替時は `ggml-small.bin`。サーバーは user service で起動する。
 - 状態と録音は `${XDG_RUNTIME_DIR}/voice-input/`。失敗時は `gpu.log`、`cpu.log` を見る。
 - Hyprland のユーザー設定 `~/.config/hypr/hyprland.lua` で `input.virtualkeyboard.share_states = 0` にしている。このファイルは本リポジトリ外。
 - `~/.config/hypr/binds-omarchy.lua` に `voice_input_typing` submap と復帰用 `F12` を定義している。このファイルも本リポジトリ外。ユーザーの直後の試行では誤爆しなかった。

@@ -15,7 +15,7 @@
 
 - Hyprland の設定で `SUPER + H` に `voice-input` を割り当てる。設定ファイルはマシンによって違い、`~/.config/hypr/binds-omarchy.lua` または `~/.config/hypr/hyprland.lua` に置いている。
 - 実際に呼ばれるファイルは `~/.local/bin/voice-input`。このディレクトリの `voice-input` が編集用の原本。
-- 録音に `pw-record`、文字起こしにローカルの `whisper-server` を使う。GPU 側は `${XDG_DATA_HOME:-$HOME/.local/share}/whisper/ggml-medium.bin`、CPU への切替時は `ggml-small.bin` を使う。サーバーと CPU 版 CLI はパッケージ版の `/usr/bin/whisper-server` と `/usr/bin/whisper-cli`。
+- 録音に `pw-record`、文字起こしにローカルの `whisper-server` を使う。GPU 側は `${XDG_DATA_HOME:-$HOME/.local/share}/whisper/ggml-medium-q8_0.bin`（`ggml-medium.bin` を `q8_0` に量子化したもの）、CPU への切替時は `ggml-small.bin` を使う。サーバーと CPU 版 CLI はパッケージ版の `/usr/bin/whisper-server` と `/usr/bin/whisper-cli`。
 - 出力音量の変更と復元には `wpctl` を使う。録音開始時の出力先と音量を保存するため、途中で既定の出力先を変更しても元の出力先へ戻す。
 - 結果の入力に `wl-copy`、`wtype`、`fcitx5-remote` を使う。
 
@@ -28,6 +28,12 @@ sudo pacman -S whisper-cpp ggml-cuda
 ```
 
 `whisper-server` と `whisper-cli` が `/usr/bin` に入り、CUDA バックエンドは実行時に `/usr/lib/ggml/libggml-cuda.so` から読み込まれる。モデルは別途 `${XDG_DATA_HOME:-$HOME/.local/share}/whisper/` に `ggml-medium.bin` と `ggml-small.bin` を置く。
+
+GPU 側は VRAM を節約するため、`ggml-medium.bin` を `q8_0` に量子化して使う。f16 の約 1.5GB に対して約 0.8GB で、日本語の認識結果は f16 と変わらなかった。
+
+```sh
+whisper-quantize ~/.local/share/whisper/ggml-medium.bin ~/.local/share/whisper/ggml-medium-q8_0.bin q8_0
+```
 
 このディレクトリで次を実行して user service を登録する。
 

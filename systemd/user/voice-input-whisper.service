@@ -2,7 +2,7 @@
 Description=Whisper server for voice-input
 
 [Service]
-ExecStart=/usr/bin/whisper-server -m %h/.local/share/whisper/ggml-medium.bin -l ja -nt -t 4 --host 127.0.0.1 --port 8082
+ExecStart=/usr/bin/whisper-server -m %h/.local/share/whisper/ggml-medium-q8_0.bin -l ja -nt -t 4 --host 127.0.0.1 --port 8082
 Restart=on-failure
 
 [Install]

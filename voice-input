@@ -142,6 +142,8 @@ if [ -f "$pid_file" ]; then
       temperature: 0,
       max_tokens: 1024,
       stream: false,
+      # 清書に「考える過程」は要らない。切ると 3 秒前後が 0.4 秒ほどになる
+      chat_template_kwargs: {enable_thinking: false},
       response_format: {
         type: "json_schema",
         schema: {

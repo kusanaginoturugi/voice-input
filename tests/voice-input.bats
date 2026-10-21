@@ -337,6 +337,7 @@ MOCK
   [ "$(cat "$state/transcript.cleaned.txt")" = "$MOCK_LLM_TEXT" ]
   [ "$(jq -r '.model' "$T/llm-request.json")" = gemma-4-E4B-it-qat ]
   [ "$(jq -r '.messages[1].content' "$T/llm-request.json")" = "$MOCK_GPU_TEXT " ]
+  [ "$(jq -r '.chat_template_kwargs.enable_thinking' "$T/llm-request.json")" = false ]
   jq -e --arg raw "$MOCK_GPU_TEXT " --arg output "$MOCK_LLM_TEXT" '
     .whisper_model == "ggml-medium-q8_0.bin" and
     .llm_model == "gemma-4-E4B-it-qat" and .cleanup_status == "applied" and

@@ -13,6 +13,7 @@
 - [x] 評価点・判定段階・確率・モデル名・所要時間を入力履歴と照合できる形で保存する。
 - [x] 低スコアの絞り込みを操作画面へ追加し、失敗時も入力を妨げないことをテストする。
 - [x] Laya Q8 を一時サーバーと本番ルーターで試し、正誤例の点数と所要時間を確認する。
+- [x] Laya Q8 の CPU と GPU の速度・スコア・VRAM 使用量を同じ評価文で比較する。
 - [ ] 実際の発話を使って点数の妥当性を確認する。
 
 ## 作業計画（2026-10-21: モデル切替と履歴閲覧）
@@ -67,6 +68,7 @@
 - 2026-10-21: `voice-input-judge` を追加。入力を返した後、Laya Q8 の `/v1/systemone` で原文と清書文を5段階評価し、期待値を0〜100点に換算する。判定段階・各段階の確率・所要時間を `judgments.jsonl` に記録する。`reason` は生成した説明ではなく、最大確率の段階名。
 - 2026-10-21: 当初 Ornith を評価に使ったが、判断専用モデルではなかったため Laya に変更。`~/.config/llama.cpp/models.ini` に `laya-q8` を追加し、llama.cpp user service を `--models-max 2` に変更して再起動。Gemma と Laya は同時保持でき、Whisper 込みの GPU 使用量は 8206 / 12288 MiB（Whisper 1294、Gemma 6208、Laya 150 MiB）。
 - 2026-10-21: 合成例を本番ルーターで評価し、正しい清書82点（約997ms）、曜日と時刻を誤った清書5点（約82ms）。実際の発話と幅広い例での点数校正は未実施。
+- 2026-10-21: Laya Q8 を GPU 全層で別ポートに一時起動し、CPU 版と同じ訂正入り短文を各5回評価。両者とも約82.5点。HTTP 応答時間は CPU が1回目789ms・以降約50ms、GPU が1回目122ms・以降約14ms。GPU 版の VRAM は520MiB、空きは約1.0GiB。実験サーバーを停止し、常用設定は CPU のまま。
 - 2026-10-21: `make test` で shellcheck と29件の Bats テストが通過。3コマンドを `~/.local/bin/` に配置して原本との一致を確認。
 - `systemd/user/voice-input-whisper.service` で CUDA 版 `whisper-server` を起動。ポートは `8082`。
 - 随時入力は短い区間で文脈が切れ、停止キーと文字入力も干渉したため、一括入力へ変更。
@@ -91,6 +93,7 @@
 
 - 清書が適用され、履歴記録に成功した入力だけ Laya Q8 の `/v1/systemone` で評価する。`VOICE_INPUT_JUDGE=0` で停止、`VOICE_INPUT_JUDGE_MODEL` と `VOICE_INPUT_JUDGE_URL` で変更できる。評価は別プロセスで動き、`judgments.jsonl` に記録する。llama-server は `--models-max 2`。サービス変更前のファイルは `~/.config/systemd/user/llama.cpp.service.bak-before-voice-input-two-models`。
 - Laya のモデル設定は `~/.config/llama.cpp/models.ini` の `[laya-q8]`。設定変更前のバックアップは `~/.config/llama.cpp/models.ini.bak-before-laya-voice-input`。
+- GPU で動かすなら `[laya-q8]` の `n-gpu-layers = all`。実測では繰り返し評価が約50msから約14msになり、VRAM は Laya プロセスで520MiB使用した。現在は `0` のままで、実験サーバーは停止済み。
 - `voice-inputctl` は `fzf` と `jq` が必要。`voice-inputctl model` でモデル選択、`voice-inputctl logs` で履歴選択。端末のない場面では `voice-inputctl model ID` と `voice-inputctl logs --json` を使える。`VOICE_INPUT_LLM_BASE_URL` でモデル一覧の接続先を変えられる。
 - 選択したモデルは `~/.config/voice-input/model` に保存し、次の音声入力から使う。環境変数 `VOICE_INPUT_LLM_MODEL` が設定されている場合はそちらを優先する。
 - 履歴は自動で追記される。保存先は `~/.local/state/voice-input/history.jsonl`（`XDG_STATE_HOME` があればそちら）。職場で残さない場合は起動コマンドに `VOICE_INPUT_LOG=0` を付ける。

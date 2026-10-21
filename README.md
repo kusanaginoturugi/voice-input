@@ -55,6 +55,15 @@ ubatch-size = 512
 
 `llama.cpp.service` では既存の `--models-preset` にこのファイルの絶対パスを指定し、`--models-max 2` を付ける。設定を変えたら `systemctl --user daemon-reload` と `systemctl --user restart llama.cpp.service` を実行する。
 
+Laya Q8 の GPU 動作も、既存サービスとは別の一時サーバーで試した。同じ訂正を含む短文を `/v1/systemone` に5回送り、CPU と GPU で同じスコア（約82.5/100）が返った。以下は HTTP リクエスト全体の所要時間で、初回はモデルの起動時間を含まない。
+
+| 実行先 | 1回目 | 2〜5回目 | Laya プロセスの GPU メモリ |
+| --- | ---: | ---: | ---: |
+| CPU（`n-gpu-layers = 0`） | 789ms | 約50ms | 182MiB |
+| GPU（`n-gpu-layers = all`） | 122ms | 約14ms | 520MiB |
+
+GPU 版を追加したときの空き VRAM は約1.0GiB（RTX 3060 12GiB、Whisper と清書モデルも稼働中）。GPU で試す場合は `[laya-q8]` の `n-gpu-layers` を `all` に変更する。現在の常用設定は `0` のまま。評価は文字入力後に走るので、入力完了までの時間にはこの差は含まれない。
+
 ## 入力履歴
 
 入力が完了するたびに `${XDG_STATE_HOME:-$HOME/.local/state}/voice-input/history.jsonl` へ1行の JSON を追記する。`id` は評価ログとの照合に使う。`raw_text` は Whisper の原文、`output_text` は実際に入力した文。`whisper_model` と `llm_model` はモデル名、`cleanup_status` は `applied`（清書適用）、`failed`（清書失敗）、`short`（短文）、`disabled`（無効）、`unavailable`（jq なし）のいずれか。`whisper_ms`、`cleanup_ms`、`total_ms` はミリ秒で、全体時間は録音停止後の処理開始から文字入力完了までを測る。評価時間は `judgments.jsonl` の `judge_ms` に別記録する。Whisper が CPU に切り替わった場合の `whisper_ms` には GPU の試行も含む。Whisper サーバー側のモデル名を変えた場合は `VOICE_INPUT_WHISPER_MODEL` も合わせる。

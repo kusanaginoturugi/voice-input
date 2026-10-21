@@ -1,5 +1,17 @@
 # 作業計画・記録・引き継ぎ
 
+## 作業計画（2026-10-21: 評価点の HUD 表示）
+
+- [x] 清書評価が成功したら HUD に点数と decision の判定段階を表示し、69点以下は要確認を付ける。
+- [x] 評価失敗や HUD の不在で音声入力を妨げない。
+- [x] テストと実行先への配置を確認する。
+
+## 作業計画（2026-10-21: 原文をクリップボードへ保存）
+
+- [x] Whisper の原文を清書前にクリップボードへコピーする。
+- [x] `wtype` は清書結果を入力し、履歴には原文と清書文を引き続き保存する。
+- [x] テストと実行先への配置を確認する。
+
 ## 作業計画（2026-10-21: 配置の一本化）
 
 - [x] 3コマンドを一度に配置する `deploy` を追加し、作業ディレクトリに依存しないようにする。
@@ -61,6 +73,7 @@
 
 ## 作業記録
 
+- 2026-10-21: Whisper 原文を清書前にクリップボードへコピーし、`wtype` は清書結果を入力するよう変更。清書評価の HUD には点数と最大確率の decision 判定段階を表示し、69点以下は「要確認」を付ける。スコアは正解率ではないため `%` を付けない。`make test` で30件通過し、`./deploy` で3コマンドを配置して原本との一致を確認。
 - 2026-10-21: `deploy` を追加。`voice-input`、`voice-inputctl`、`voice-input-judge` を既定で `~/.local/bin/` に配置する。任意の配置先を引数で指定できる。`make test` で29件通過。別ディレクトリから一時配置先への実行と、実配置先の3ファイルの原本一致・実行権限を確認。
 - 2026-10-21: `voice-input` に llama.cpp の清書を追加。既定は `gemma-4-E4B-it-qat`、15秒で打ち切り、失敗時は原文を入力する。VOICEVOX の合成音声では、言い直しを含む発話を正しく清書した（モデル切替込み初回10.42秒、2回目1.76秒）。実際の発話での品質は未確認。
 - 2026-10-21: 入力履歴を `history.jsonl` に追記。原文・入力文・モデル名・清書状態・Whisper/清書/全体の所要時間を記録し、保存先を `700`/`600` に設定。`VOICE_INPUT_LOG=0` で無効化できる。
@@ -94,6 +107,8 @@
 - 清書が適用され、履歴記録に成功した入力だけ Laya Q8 の `/v1/systemone` で評価する。`VOICE_INPUT_JUDGE=0` で停止、`VOICE_INPUT_JUDGE_MODEL` と `VOICE_INPUT_JUDGE_URL` で変更できる。評価は別プロセスで動き、`judgments.jsonl` に記録する。llama-server は `--models-max 2`。サービス変更前のファイルは `~/.config/systemd/user/llama.cpp.service.bak-before-voice-input-two-models`。
 - Laya のモデル設定は `~/.config/llama.cpp/models.ini` の `[laya-q8]`。設定変更前のバックアップは `~/.config/llama.cpp/models.ini.bak-before-laya-voice-input`。
 - GPU で動かすなら `[laya-q8]` の `n-gpu-layers = all`。実測では繰り返し評価が約50msから約14msになり、VRAM は Laya プロセスで520MiB使用した。現在は `0` のままで、実験サーバーは停止済み。
+- Whisper の原文はクリップボードへ、清書結果は `wtype` で入力先へ送る。清書しない場合は両方とも原文になる。
+- 清書評価の HUD 表示は `voice-input-judge` が入力後に行う。点数と最大確率の decision 判定段階を表示し、69点以下は「要確認」を付ける。評価失敗時や HUD がないときは通知しない。
 - `voice-inputctl` は `fzf` と `jq` が必要。`voice-inputctl model` でモデル選択、`voice-inputctl logs` で履歴選択。端末のない場面では `voice-inputctl model ID` と `voice-inputctl logs --json` を使える。`VOICE_INPUT_LLM_BASE_URL` でモデル一覧の接続先を変えられる。
 - 選択したモデルは `~/.config/voice-input/model` に保存し、次の音声入力から使う。環境変数 `VOICE_INPUT_LLM_MODEL` が設定されている場合はそちらを優先する。
 - 履歴は自動で追記される。保存先は `~/.local/state/voice-input/history.jsonl`（`XDG_STATE_HOME` があればそちら）。職場で残さない場合は起動コマンドに `VOICE_INPUT_LOG=0` を付ける。

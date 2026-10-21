@@ -1,6 +1,6 @@
 # voice-input
 
-`SUPER + H` で音声入力を開始し、もう一度押すと止める。録音中は現在の出力音量を20%に下げ、停止キーで元に戻す。停止後に録音全体を GPU の Whisper サーバーで文字起こしし、ローカル LLM で清書してから現在の入力先へ入力する。結果はクリップボードにもコピーする。IME が有効な場合は、入力中だけオフにしてから元に戻す。
+`SUPER + H` で音声入力を開始し、もう一度押すと止める。録音中は現在の出力音量を20%に下げ、停止キーで元に戻す。停止後に録音全体を GPU の Whisper サーバーで文字起こしし、原文をクリップボードへコピーしてから、ローカル LLM の清書結果を現在の入力先へ入力する。IME が有効な場合は、入力中だけオフにしてから元に戻す。
 
 ## 動作仕様
 
@@ -8,8 +8,8 @@
 2. 2回目の `SUPER + H` で録音を止め、出力音量をすぐに戻す。録音中には文字を入力しない。
 3. 録音全体を `127.0.0.1:8082/inference` に送り、日本語・タイムスタンプなしのテキストを取得する。GPU 処理が失敗するか空の結果を返した場合は、HUD に切替を表示して CPU の small モデルで同じ録音を再処理する。
 4. 10文字以上の認識結果はローカルの llama.cpp に送り、フィラーと言い直しの削除、句読点の調整を依頼する。15秒以内に清書できない場合や結果が空の場合は原文を使う。
-5. 最終結果をクリップボードにコピーし、現在フォーカスしている入力先へ `wtype` で打ち込む。IME が有効なら打ち込み中だけ無効にする。HUD には状態だけを表示する。
-6. 清書を適用した入力は、文字を返した後で別プロセスの評価モデルに渡す。評価待ちで文字入力を止めない。
+5. Whisper の原文をクリップボードへコピーし、清書結果を現在フォーカスしている入力先へ `wtype` で打ち込む。清書しなかった場合は両方とも原文になる。IME が有効なら打ち込み中だけ無効にする。
+6. 清書を適用した入力は、文字を返した後で別プロセスの評価モデルに渡す。評価待ちで文字入力を止めず、完了したら点数と判定段階を HUD に表示する。
 
 録音した WAV は次の録音開始時まで残る。Whisper の原文は `transcript.txt`、清書に成功した結果は `transcript.cleaned.txt` に残る。変換の失敗内容は同じディレクトリの `gpu.log`、`cpu.log` または `cleanup.log` に残る。
 
@@ -41,6 +41,8 @@ voice-inputctl logs --json          # 絞り込んだ履歴を JSONL で出力
 清書を適用した入力は、文字入力後に判断モデル Laya Q8（`laya-q8`）で原文と清書文を比較する。llama.cpp の `/v1/systemone` に5段階の `score` 質問を送り、返った期待値を0〜100点に換算する。判定段階と各段階の確率も保存する。69点以下は確認候補として `voice-inputctl` の「低スコアを見る」または `voice-inputctl logs --max-score 69` で見られる。点数はこの用途で校正したものではなく、音声からの文字起こし精度も判定できない。[Laya のモデルカード](https://huggingface.co/ggml-org/Laya-GGUF)、[llama.cpp の API 仕様](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md#post-v1systemone-typesafe-compatible-system-one-api)。
 
 評価は `${XDG_STATE_HOME:-$HOME/.local/state}/voice-input/judgments.jsonl` に保存する。`reason` は生成された説明ではなく、最も確率の高い判定段階のラベル。評価前の履歴は「未評価」、失敗時は「失敗」と表示する。`VOICE_INPUT_JUDGE_MODEL` で判断モデル、`VOICE_INPUT_JUDGE_URL` で API の接続先を指定でき、`VOICE_INPUT_JUDGE=0` で評価を無効にできる。履歴を無効にした場合も評価は動かない。Laya は `~/.config/llama.cpp/models.ini` の `laya-q8` プリセットに登録済み。llama-server は2モデルを同時保持し、Gemma と Laya を載せた実測 GPU 使用量は Whisper 込みで約8.2GB / 12GB。
+
+評価に成功したら、文字入力の後で HUD に `音声入力: 清書評価 85点（意味は保持）` のように点数と decision の判定段階を表示する。69点以下は `要確認` を付ける。これは正解率ではなく、Laya の5段階評価を0〜100点に換算した値。評価失敗時は HUD に出さず、履歴に失敗状態を残す。HUD が使えない場合も入力と履歴記録は続く。
 
 このマシンの `models.ini` には次のプリセットを追加した。Laya は CPU で動かす。
 
@@ -82,7 +84,7 @@ jq -r '[.timestamp, .whisper_model, .llm_model, .cleanup_status, .whisper_ms, .c
 - 録音に `pw-record`、文字起こしにローカルの `whisper-server` を使う。GPU 側は `${XDG_DATA_HOME:-$HOME/.local/share}/whisper/ggml-medium-q8_0.bin`（`ggml-medium.bin` を `q8_0` に量子化したもの）、CPU への切替時は `ggml-small.bin` を使う。サーバーと CPU 版 CLI はパッケージ版の `/usr/bin/whisper-server` と `/usr/bin/whisper-cli`。
 - 出力音量の変更と復元には `wpctl` を使う。録音開始時の出力先と音量を保存するため、途中で既定の出力先を変更しても元の出力先へ戻す。
 - 清書にローカルの `llama-server` と `jq` を使う。サーバーが停止していても原文入力に戻る。
-- 結果の入力に `wl-copy`、`wtype`、`fcitx5-remote` を使う。
+- Whisper 原文のコピーと清書結果の入力に `wl-copy`、`wtype`、`fcitx5-remote` を使う。
 
 ## CUDA 版 Whisper サーバー
 
@@ -159,6 +161,7 @@ end)
 | 文字起こし中 | `hud-status` に `<PID> transcribing` | PID が生きている | `音声入力: 文字起こし中…` |
 | CPU へ切替 | 既存の `hud` と `hud-status` を呼び出す | 5 秒の通知と、終了までの状態表示 | `GPU処理失敗、CPUへ切替` / `CPUで処理中` |
 | VRAM 不足 | 切替後の `whisper-cli` が `out of memory` で失敗したら `hud` を呼ぶ | 5 秒の通知 | `音声入力: VRAM不足で処理できません` |
+| 清書評価 | 文字入力後に `voice-input-judge` が `hud` を呼ぶ | 評価成功時の通知 | `音声入力: 清書評価 85点（意味は保持）` / `音声入力: 清書評価 42点 要確認（重要な情報に差）` |
 | 終了後 | 状態ファイルなし | 状態なし | 非表示 |
 
 2回目の起動時に録音を止め、文字起こしが終わったら状態ファイルを消す。通常のデスクトップ通知は出さない。

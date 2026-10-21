@@ -125,6 +125,7 @@ if [ -f "$pid_file" ]; then
   whisper_ms=$(( $(date +%s%3N) - processing_started_ms ))
   transcript=$(tr '\n' ' ' < "$text_base.txt")
   raw_transcript=$transcript
+  printf '%s' "$raw_transcript" | wl-copy
   cleanup_status=disabled
   cleanup_ms=0
   rm -f "$text_base.cleaned.txt"
@@ -168,8 +169,6 @@ if [ -f "$pid_file" ]; then
     fi
     cleanup_ms=$(( $(date +%s%3N) - cleanup_started_ms ))
   fi
-  printf '%s' "$transcript" | wl-copy
-
   # IME が有効だと wtype の入力が SKK に食われるので、入力中だけ切る
   ime_state=$(fcitx5-remote 2>/dev/null || echo 0)
   if [ "$ime_state" = 2 ]; then

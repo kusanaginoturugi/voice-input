@@ -6,6 +6,7 @@ judge_model="${VOICE_INPUT_JUDGE_MODEL:-laya-q8}"
 judge_url="${VOICE_INPUT_JUDGE_URL:-http://127.0.0.1:8080/v1/systemone}"
 log_dir="${XDG_STATE_HOME:-$HOME/.local/state}/voice-input"
 judge_file="$log_dir/judgments.jsonl"
+hud="$HOME/.local/bin/hud"
 
 record=$(cat)
 record_id=$(jq -er '.id | select(type == "string" and length > 0)' <<< "$record")
@@ -73,3 +74,12 @@ chmod 700 "$log_dir"
 touch "$judge_file"
 chmod 600 "$judge_file"
 printf '%s\n' "$judgment" >> "$judge_file"
+
+if [[ $status == ok && -x $hud ]]; then
+  message="音声入力: 清書評価 ${score}点"
+  if (( score <= 69 )); then
+    message+=' 要確認'
+  fi
+  message+="（${reason}）"
+  "$hud" -s off --no-voice "$message" >/dev/null 2>&1 || true
+fi

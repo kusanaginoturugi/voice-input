@@ -74,7 +74,7 @@ if [ "$is_judge" = 1 ]; then
   echo 'curl judge' >> "$T/calls"
   printf '%s' "$payload" > "$T/judge-request.json"
   case "$MOCK_JUDGE" in
-    ok) jq -n --argjson score "$MOCK_JUDGE_SCORE" '{answers:{quality:{score:$score,confidence:0.4,probabilities:{"0":0.08,"1":0.38,"2":0.37,"3":0.12,"4":0.05}}}}' > "$out" ;;
+    ok) jq -n --argjson score "$MOCK_JUDGE_SCORE" '{answers:{quality:{score:$score,confidence:0.4,probabilities:(if $score >= 3 then {"0":0.01,"1":0.04,"2":0.15,"3":0.6,"4":0.2} else {"0":0.08,"1":0.38,"2":0.37,"3":0.12,"4":0.05} end)}}}' > "$out" ;;
     invalid) printf '%s\n' '{"answers":{"quality":{"score":"bad"}}}' > "$out" ;;
     fail) exit 7 ;;
   esac
@@ -112,6 +112,7 @@ fi
 printf '%s\n' "$MOCK_CPU_TEXT" > "$base.txt"
 EOF
   mock wl-copy <<'EOF'
+echo wl-copy >> "$T/calls"
 cat > "$T/clipboard"
 EOF
   mock wtype <<'EOF'
@@ -330,7 +331,8 @@ MOCK
   [ "$status" -eq 0 ]
   called 'curl llm'
   [ "$(cat "$T/typed")" = '水曜日の会議です。' ]
-  [ "$(cat "$T/clipboard")" = '水曜日の会議です。' ]
+  [ "$(cat "$T/clipboard")" = "$MOCK_GPU_TEXT " ]
+  [ "$(line_of 'curl llm')" -gt "$(line_of 'wl-copy')" ]
   [ "$(cat "$state/transcript.txt")" = "$MOCK_GPU_TEXT" ]
   [ "$(cat "$state/transcript.cleaned.txt")" = "$MOCK_LLM_TEXT" ]
   [ "$(jq -r '.model' "$T/llm-request.json")" = gemma-4-E4B-it-qat ]
@@ -480,6 +482,16 @@ MOCK
   [ "$(stat -c %a "$XDG_STATE_HOME/voice-input/judgments.jsonl")" = 600 ]
   [ "$(jq -r '.model' "$T/judge-request.json")" = laya-q8 ]
   [ "$(jq -r '.questions.quality.type' "$T/judge-request.json")" = score ]
+  called 'hud -s off --no-voice 音声入力: 清書評価 42点 要確認（重要な情報に差）'
+}
+
+@test "高スコアの評価は点数と判定段階を HUD に表示する" {
+  MOCK_JUDGE_SCORE=3.4
+  jq -nc '{id:"record-high",raw_text:"えー、水曜日です",output_text:"水曜日です"}' > "$T/record.json"
+  run "$JUDGE" < "$T/record.json"
+  [ "$status" -eq 0 ]
+  called 'hud -s off --no-voice 音声入力: 清書評価 85点（意味は保持）'
+  [ "$(jq -r '.score' "$XDG_STATE_HOME/voice-input/judgments.jsonl")" = 85 ]
 }
 
 @test "評価に失敗しても失敗状態を保存する" {
@@ -489,6 +501,7 @@ MOCK
   [ "$status" -eq 0 ]
   jq -e '.record_id == "record-2" and .status == "failed" and .score == null' \
     "$XDG_STATE_HOME/voice-input/judgments.jsonl"
+  ! grep -q '^hud ' "$T/calls"
 }
 
 @test "低スコア履歴を絞り込み、評価理由を表示する" {

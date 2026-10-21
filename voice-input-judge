@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+
+judge_model="${VOICE_INPUT_JUDGE_MODEL:-laya-q8}"
+judge_url="${VOICE_INPUT_JUDGE_URL:-http://127.0.0.1:8080/v1/systemone}"
+log_dir="${XDG_STATE_HOME:-$HOME/.local/state}/voice-input"
+judge_file="$log_dir/judgments.jsonl"
+
+record=$(cat)
+record_id=$(jq -er '.id | select(type == "string" and length > 0)' <<< "$record")
+raw_text=$(jq -er '.raw_text | select(type == "string")' <<< "$record")
+output_text=$(jq -er '.output_text | select(type == "string")' <<< "$record")
+
+started_ms=$(date +%s%3N)
+status=failed
+score=null
+reason=''
+level_score=null
+confidence=null
+probabilities=null
+response_file=$(mktemp)
+trap 'rm -f -- "$response_file"' EXIT
+
+payload=$(jq -n --arg model "$judge_model" --arg raw "$raw_text" --arg output "$output_text" '{
+  model: $model,
+  state: "原文: \($raw)\n清書文: \($output)",
+  questions: {
+    quality: {
+      type: "score",
+      instructions: "Does the cleaned text preserve the corrected meaning of the original transcript, including dates, numbers and proper nouns, while removing filler?",
+      criteria: [
+        "Wrong meaning or lost correction",
+        "Important detail changed",
+        "Minor detail issue",
+        "Meaning preserved",
+        "Excellent clean rewrite"
+      ]
+    }
+  }
+}')
+
+if curl --fail --silent --show-error --connect-timeout 1 --max-time 30 \
+  -H 'Content-Type: application/json' --data-binary "$payload" \
+  "$judge_url" -o "$response_file" 2>/dev/null; then
+  result=$(jq -ec '
+    .answers.quality as $answer |
+    select($answer.score | type == "number" and . >= 0 and . <= 4) |
+    select($answer.probabilities | type == "object" and length == 5) |
+    ($answer.probabilities | to_entries | max_by(.value) | .key) as $level |
+    {score: ($answer.score * 25 | round), level_score: $answer.score,
+     confidence: ($answer.confidence // null), probabilities: $answer.probabilities,
+     reason: ({"0":"意味が変わった可能性","1":"重要な情報に差","2":"軽微な差","3":"意味は保持","4":"良い清書"}[$level])}
+  ' "$response_file" 2>/dev/null) || result=
+  if [[ -n $result ]]; then
+    score=$(jq -r '.score' <<< "$result")
+    reason=$(jq -r '.reason' <<< "$result")
+    level_score=$(jq -r '.level_score' <<< "$result")
+    confidence=$(jq -r '.confidence' <<< "$result")
+    probabilities=$(jq -c '.probabilities' <<< "$result")
+    status=ok
+  fi
+fi
+
+judge_ms=$(( $(date +%s%3N) - started_ms ))
+judgment=$(jq -nc --arg record_id "$record_id" --arg model "$judge_model" \
+  --arg status "$status" --arg reason "$reason" --argjson score "$score" \
+  --argjson level_score "$level_score" --argjson confidence "$confidence" \
+  --argjson probabilities "$probabilities" --argjson judge_ms "$judge_ms" \
+  '{record_id:$record_id,judge_model:$model,status:$status,score:$score,reason:$reason,level_score:$level_score,confidence:$confidence,probabilities:$probabilities,judge_ms:$judge_ms}')
+mkdir -p "$log_dir"
+chmod 700 "$log_dir"
+touch "$judge_file"
+chmod 600 "$judge_file"
+printf '%s\n' "$judgment" >> "$judge_file"

@@ -3,12 +3,17 @@
 # 偽コマンドは呼ばれた内容を $T/calls に1行ずつ書く。
 
 SCRIPT="$BATS_TEST_DIRNAME/../voice-input"
+CTL="$BATS_TEST_DIRNAME/../voice-inputctl"
+JUDGE="$BATS_TEST_DIRNAME/../voice-input-judge"
 
 setup() {
   T="$BATS_TEST_TMPDIR"
   export HOME="$T/home"
   export XDG_RUNTIME_DIR="$T/run"
   export XDG_DATA_HOME="$T/data"
+  export XDG_STATE_HOME="$T/state"
+  export XDG_CONFIG_HOME="$T/config"
+  unset VOICE_INPUT_LLM_MODEL
   export VOICE_INPUT_WHISPER_CLI="$T/bin/whisper-cli"
   export T
   state="$XDG_RUNTIME_DIR/voice-input"
@@ -25,6 +30,12 @@ setup() {
   export MOCK_CLI=ok
   export MOCK_IME=1
   export MOCK_WTYPE=ok
+  export VOICE_INPUT_CLEANUP=0
+  export VOICE_INPUT_LOG=1
+  export MOCK_LLM=ok
+  export MOCK_LLM_TEXT='清書した結果'
+  export MOCK_JUDGE=ok
+  export MOCK_JUDGE_SCORE=1.68
 
   mock wpctl <<'EOF'
 echo "wpctl $*" >> "$T/calls"
@@ -49,12 +60,38 @@ case "$1" in
 esac
 EOF
   mock curl <<'EOF'
-echo curl >> "$T/calls"
 out=
+payload=
+is_llm=0
+is_judge=0
 while [ "$#" -gt 0 ]; do
   [ "$1" = -o ] && out=$2
+  [ "$1" = --data-binary ] && payload=$2
+  case "$1" in *chat/completions) is_llm=1 ;; *systemone) is_judge=1 ;; esac
   shift
 done
+if [ "$is_judge" = 1 ]; then
+  echo 'curl judge' >> "$T/calls"
+  printf '%s' "$payload" > "$T/judge-request.json"
+  case "$MOCK_JUDGE" in
+    ok) jq -n --argjson score "$MOCK_JUDGE_SCORE" '{answers:{quality:{score:$score,confidence:0.4,probabilities:{"0":0.08,"1":0.38,"2":0.37,"3":0.12,"4":0.05}}}}' > "$out" ;;
+    invalid) printf '%s\n' '{"answers":{"quality":{"score":"bad"}}}' > "$out" ;;
+    fail) exit 7 ;;
+  esac
+  exit 0
+fi
+if [ "$is_llm" = 1 ]; then
+  echo 'curl llm' >> "$T/calls"
+  printf '%s' "$payload" > "$T/llm-request.json"
+  case "$MOCK_LLM" in
+    ok) jq -n --arg text "$MOCK_LLM_TEXT" '{choices: [{message: {content: ({text: $text} | tojson)}}]}' > "$out" ;;
+    empty) printf '%s\n' '{"choices":[{"message":{"content":"{\"text\":\"\"}"}}]}' > "$out" ;;
+    invalid) printf '%s\n' 'not json' > "$out" ;;
+    fail) echo 'connection refused' >&2; exit 7 ;;
+  esac
+  exit 0
+fi
+echo curl whisper >> "$T/calls"
 case "$MOCK_CURL" in
   ok) printf '%s\n' "$MOCK_GPU_TEXT" > "$out" ;;
   empty) : > "$out" ;;
@@ -282,4 +319,206 @@ MOCK
   run "$SCRIPT"
   [ "$status" -eq 0 ]
   [ "$(cat "$T/typed")" = '-から始まる 二行目 ' ]
+}
+
+@test "清書は既定で有効で、原文を残して清書結果を入力する" {
+  unset VOICE_INPUT_CLEANUP
+  MOCK_GPU_TEXT='えーと、火曜日、違った、水曜日の会議です。'
+  MOCK_LLM_TEXT='水曜日の会議です。'
+  start_fake_recording
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  called 'curl llm'
+  [ "$(cat "$T/typed")" = '水曜日の会議です。' ]
+  [ "$(cat "$T/clipboard")" = '水曜日の会議です。' ]
+  [ "$(cat "$state/transcript.txt")" = "$MOCK_GPU_TEXT" ]
+  [ "$(cat "$state/transcript.cleaned.txt")" = "$MOCK_LLM_TEXT" ]
+  [ "$(jq -r '.model' "$T/llm-request.json")" = gemma-4-E4B-it-qat ]
+  [ "$(jq -r '.messages[1].content' "$T/llm-request.json")" = "$MOCK_GPU_TEXT " ]
+  jq -e --arg raw "$MOCK_GPU_TEXT " --arg output "$MOCK_LLM_TEXT" '
+    .whisper_model == "ggml-medium-q8_0.bin" and
+    .llm_model == "gemma-4-E4B-it-qat" and .cleanup_status == "applied" and
+    .raw_text == $raw and .output_text == $output and
+    (.whisper_ms | type == "number") and (.cleanup_ms | type == "number") and
+    (.total_ms | type == "number")
+  ' "$XDG_STATE_HOME/voice-input/history.jsonl"
+}
+
+@test "清書を無効にすると LLM を呼ばず原文を入力する" {
+  MOCK_GPU_TEXT='えーと、そのまま入力します。'
+  start_fake_recording
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  ! called 'curl llm' || false
+  [ "$(cat "$T/typed")" = "$MOCK_GPU_TEXT " ]
+}
+
+@test "清書に失敗したら原文を入力する" {
+  VOICE_INPUT_CLEANUP=1
+  MOCK_GPU_TEXT='えーと、原文を使ってください。'
+  MOCK_LLM=fail
+  start_fake_recording
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  called 'curl llm'
+  [ "$(cat "$T/typed")" = "$MOCK_GPU_TEXT " ]
+  [ ! -f "$state/transcript.cleaned.txt" ]
+}
+
+@test "清書結果が空なら原文を入力する" {
+  VOICE_INPUT_CLEANUP=1
+  MOCK_GPU_TEXT='えーと、原文を使ってください。'
+  MOCK_LLM=empty
+  start_fake_recording
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$T/typed")" = "$MOCK_GPU_TEXT " ]
+}
+
+@test "短い発話は清書しない" {
+  VOICE_INPUT_CLEANUP=1
+  MOCK_GPU_TEXT='はい。'
+  start_fake_recording
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  ! called 'curl llm' || false
+  [ "$(cat "$T/typed")" = 'はい。 ' ]
+}
+
+@test "履歴は追記し、原文入力とモデル名と処理時間を記録する" {
+  start_fake_recording
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(stat -c %a "$XDG_STATE_HOME/voice-input")" = 700 ]
+  [ "$(stat -c %a "$XDG_STATE_HOME/voice-input/history.jsonl")" = 600 ]
+  jq -e '.cleanup_status == "disabled" and .cleanup_ms == 0 and
+    .raw_text == "GPUの結果 " and .output_text == "GPUの結果 " and
+    .whisper_ms >= 0 and .total_ms >= .whisper_ms and
+    (.timestamp | test("^20[0-9]{2}-[0-9]{2}-[0-9]{2}T"))' \
+    "$XDG_STATE_HOME/voice-input/history.jsonl"
+  start_fake_recording
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$XDG_STATE_HOME/voice-input/history.jsonl")" -eq 2 ]
+}
+
+@test "CPU 再処理時は実際に使った Whisper モデルを記録する" {
+  MOCK_CURL=fail
+  start_fake_recording
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.whisper_model' "$XDG_STATE_HOME/voice-input/history.jsonl")" = ggml-small.bin ]
+}
+
+@test "VOICE_INPUT_LOG=0 なら履歴を保存しない" {
+  VOICE_INPUT_LOG=0
+  start_fake_recording
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ ! -e "$XDG_STATE_HOME/voice-input/history.jsonl" ]
+}
+
+@test "選んだ清書モデルを次の音声入力で使い、reset で既定に戻す" {
+  run "$CTL" model lfm2.5-2.6b
+  [ "$status" -eq 0 ]
+  [ "$(stat -c %a "$XDG_CONFIG_HOME/voice-input")" = 700 ]
+  [ "$(stat -c %a "$XDG_CONFIG_HOME/voice-input/model")" = 600 ]
+  run "$CTL" model show
+  [ "$output" = lfm2.5-2.6b ]
+  VOICE_INPUT_CLEANUP=1
+  MOCK_GPU_TEXT='えーと、十分な長さの音声です。'
+  start_fake_recording
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.model' "$T/llm-request.json")" = lfm2.5-2.6b ]
+  run "$CTL" model reset
+  [ "$status" -eq 0 ]
+  run "$CTL" model show
+  [ "$output" = gemma-4-E4B-it-qat ]
+}
+
+@test "環境変数のモデル指定は保存した設定より優先する" {
+  "$CTL" model lfm2.5-2.6b
+  export VOICE_INPUT_LLM_MODEL=another-model
+  run "$CTL" model show
+  [ "$output" = another-model ]
+  VOICE_INPUT_CLEANUP=1
+  MOCK_GPU_TEXT='えーと、十分な長さの音声です。'
+  start_fake_recording
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.model' "$T/llm-request.json")" = another-model ]
+}
+
+@test "履歴を日付・モデル・状態・本文で絞り込む" {
+  local history="$XDG_STATE_HOME/voice-input/history.jsonl"
+  mkdir -p "${history%/*}"
+  jq -n -c '{timestamp:"2026-10-19T10:00:00+09:00",whisper_model:"small",llm_model:"gemma",cleanup_status:"applied",raw_text:"月曜日",output_text:"月曜日",whisper_ms:10,cleanup_ms:20,total_ms:30}' > "$history"
+  jq -n -c '{timestamp:"2026-10-21T10:00:00+09:00",whisper_model:"medium",llm_model:"gemma",cleanup_status:"applied",raw_text:"えー、水曜日",output_text:"水曜日",whisper_ms:11,cleanup_ms:22,total_ms:33}' >> "$history"
+  jq -n -c '{timestamp:"2026-10-21T11:00:00+09:00",whisper_model:"medium",llm_model:"lfm",cleanup_status:"failed",raw_text:"木曜日",output_text:"木曜日",whisper_ms:12,cleanup_ms:23,total_ms:34}' >> "$history"
+  run "$CTL" logs --since 2026-10-20 --model gemma --status applied --text 水曜日 --json
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | jq -r '.raw_text')" = 'えー、水曜日' ]
+  [ "$(printf '%s\n' "$output" | wc -l)" -eq 1 ]
+  run "$CTL" logs --model lfm
+  [ "$status" -eq 0 ]
+  [[ $output == *$'lfm\tfailed\t-\t34\t木曜日'* ]]
+  run "$CTL" logs --text 金曜日
+  [ "$status" -eq 0 ]
+  [ "$output" = '該当する履歴はありません' ]
+}
+
+@test "評価モデルは点数・理由・所要時間を別ログに保存する" {
+  jq -nc '{id:"record-1",raw_text:"火曜日、いや、水曜日です",output_text:"火曜日です"}' > "$T/record.json"
+  run "$JUDGE" < "$T/record.json"
+  [ "$status" -eq 0 ]
+  jq -e '.record_id == "record-1" and .judge_model == "laya-q8" and
+    .status == "ok" and .score == 42 and .reason == "重要な情報に差" and
+    .level_score == 1.68 and .confidence == 0.4 and
+    .probabilities["1"] == 0.38 and
+    (.judge_ms | type == "number")' "$XDG_STATE_HOME/voice-input/judgments.jsonl"
+  [ "$(stat -c %a "$XDG_STATE_HOME/voice-input/judgments.jsonl")" = 600 ]
+  [ "$(jq -r '.model' "$T/judge-request.json")" = laya-q8 ]
+  [ "$(jq -r '.questions.quality.type' "$T/judge-request.json")" = score ]
+}
+
+@test "評価に失敗しても失敗状態を保存する" {
+  MOCK_JUDGE=invalid
+  jq -nc '{id:"record-2",raw_text:"原文",output_text:"清書"}' > "$T/record.json"
+  run "$JUDGE" < "$T/record.json"
+  [ "$status" -eq 0 ]
+  jq -e '.record_id == "record-2" and .status == "failed" and .score == null' \
+    "$XDG_STATE_HOME/voice-input/judgments.jsonl"
+}
+
+@test "低スコア履歴を絞り込み、評価理由を表示する" {
+  mkdir -p "$XDG_STATE_HOME/voice-input"
+  jq -nc '{id:"a",timestamp:"2026-10-21T10:00:00Z",whisper_model:"medium",llm_model:"gemma",cleanup_status:"applied",raw_text:"火曜日、いや、水曜日",output_text:"火曜日",whisper_ms:1,cleanup_ms:2,total_ms:3}' > "$XDG_STATE_HOME/voice-input/history.jsonl"
+  jq -nc '{id:"b",timestamp:"2026-10-21T11:00:00Z",whisper_model:"medium",llm_model:"gemma",cleanup_status:"applied",raw_text:"水曜日",output_text:"水曜日",whisper_ms:1,cleanup_ms:2,total_ms:3}' >> "$XDG_STATE_HOME/voice-input/history.jsonl"
+  jq -nc '{record_id:"a",judge_model:"ornith",status:"ok",score:42,reason:"曜日を変更",judge_ms:100}' > "$XDG_STATE_HOME/voice-input/judgments.jsonl"
+  jq -nc '{record_id:"b",judge_model:"ornith",status:"ok",score:95,reason:"問題なし",judge_ms:100}' >> "$XDG_STATE_HOME/voice-input/judgments.jsonl"
+  run "$CTL" logs --max-score 69 --json
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | jq -r '.id')" = a ]
+  [ "$(printf '%s\n' "$output" | jq -r '.judge.reason')" = '曜日を変更' ]
+  run "$CTL" logs --max-score 69
+  [ "$status" -eq 0 ]
+  [[ $output == *$'42\t3\t火曜日'* ]]
+}
+
+@test "文字入力の後に評価を起動し、履歴と評価を結び付ける" {
+  export VOICE_INPUT_JUDGE_CMD="$JUDGE"
+  VOICE_INPUT_CLEANUP=1
+  MOCK_GPU_TEXT='えーと、火曜日、いや、水曜日の会議です。'
+  start_fake_recording
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ -s "$XDG_STATE_HOME/voice-input/judgments.jsonl" ] && break
+    sleep 0.1
+  done
+  [ -s "$XDG_STATE_HOME/voice-input/judgments.jsonl" ]
+  [ "$(jq -r '.id' "$XDG_STATE_HOME/voice-input/history.jsonl")" = \
+    "$(jq -r '.record_id' "$XDG_STATE_HOME/voice-input/judgments.jsonl")" ]
+  [ "$(line_of 'wtype')" -lt "$(line_of 'curl judge')" ]
 }

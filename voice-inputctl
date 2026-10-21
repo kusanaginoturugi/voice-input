@@ -1,0 +1,176 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+
+default_model=gemma-4-E4B-it-qat
+config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/voice-input"
+model_file="$config_dir/model"
+history_file="${XDG_STATE_HOME:-$HOME/.local/state}/voice-input/history.jsonl"
+judge_file="${XDG_STATE_HOME:-$HOME/.local/state}/voice-input/judgments.jsonl"
+server_url="${VOICE_INPUT_LLM_BASE_URL:-http://127.0.0.1:8080}"
+tmp_file_to_remove=''
+trap 'if [[ -n $tmp_file_to_remove ]]; then rm -f -- "$tmp_file_to_remove"; fi' EXIT
+
+usage() {
+  cat <<'EOF'
+使い方:
+  voice-inputctl                 メニューを開く
+  voice-inputctl model           サーバーの一覧から清書モデルを選ぶ
+  voice-inputctl model show      現在の清書モデルを表示
+  voice-inputctl model ID        清書モデルを指定して保存
+  voice-inputctl model reset     既定モデルに戻す
+  voice-inputctl logs [条件]     履歴を絞り込む
+
+履歴の条件:
+  --model 文字列    Whisper または清書モデル名に含まれる文字列
+  --status 状態     applied / failed / short / disabled / unavailable
+  --since 日付      YYYY-MM-DD 以降
+  --text 文字列     原文または入力文に含まれる文字列
+  --max-score 点数   指定点以下の評価済み履歴だけ表示（0〜100）
+  --json            絞り込んだ JSONL をそのまま表示
+EOF
+}
+
+current_model() {
+  local selected=$default_model
+  if [[ -r $model_file ]]; then
+    IFS= read -r selected < "$model_file" || true
+    [[ -n $selected ]] || selected=$default_model
+  fi
+  printf '%s\n' "${VOICE_INPUT_LLM_MODEL:-$selected}"
+}
+
+set_model() {
+  local selected=$1
+  [[ -n $selected && $selected != *$'\n'* && $selected != *$'\r'* ]] || {
+    printf 'モデル名が不正です\n' >&2
+    return 2
+  }
+  mkdir -p "$config_dir"
+  chmod 700 "$config_dir"
+  printf '%s\n' "$selected" > "$model_file"
+  chmod 600 "$model_file"
+  printf '次の音声入力から使うモデル: %s\n' "$selected"
+  if [[ -n ${VOICE_INPUT_LLM_MODEL:-} ]]; then
+    printf '環境変数 VOICE_INPUT_LLM_MODEL が優先されている: %s\n' "$VOICE_INPUT_LLM_MODEL" >&2
+  fi
+}
+
+model_list() {
+  curl --fail --silent --show-error --connect-timeout 1 --max-time 5 \
+    "$server_url/v1/models" |
+    jq -r '.data[]? | [.id, (.status.value // "unknown")] | @tsv'
+}
+
+choose_model() {
+  if [[ ! -t 0 || ! -t 1 ]]; then
+    printf 'モデル名を指定するか、端末で実行して選んでください\n' >&2
+    return 2
+  fi
+  command -v fzf >/dev/null || { printf 'fzf が必要です\n' >&2; return 1; }
+  local candidates selected
+  candidates=$(model_list) || return 1
+  [[ -n $candidates ]] || { printf 'モデル一覧が空です\n' >&2; return 1; }
+  selected=$(printf '%s\n' "$candidates" | fzf --delimiter=$'\t' --with-nth=1,2 \
+    --header="現在: $(current_model)  /  会話モデルを選択" --prompt='清書モデル> ') || return 0
+  [[ -n $selected ]] || return 0
+  set_model "${selected%%$'\t'*}"
+}
+
+show_entry() {
+  local filtered_file=$1 index=$2
+  jq -r -s --argjson index "$index" '
+    .[$index] |
+    "日時: \(.timestamp)\nWhisper: \(.whisper_model) (\(.whisper_ms) ms)\n清書: \(.llm_model) [\(.cleanup_status)] (\(.cleanup_ms) ms)\n全体: \(.total_ms) ms\n評価: \(if .judge == null then "未評価" elif .judge.status == "ok" then "\(.judge.score)点 / \(.judge.judge_model) (\(.judge.judge_ms) ms)\n判定: \(.judge.reason)" else "失敗 / \(.judge.judge_model)" end)\n\n原文:\n\(.raw_text)\n\n入力文:\n\(.output_text)"
+  ' "$filtered_file"
+}
+
+show_logs() {
+  local model='' status='' since='' query='' max_score='' json=0
+  while (($#)); do
+    case $1 in
+      --model|--status|--since|--text|--max-score)
+        (($# >= 2)) || { printf '%s に値が必要です\n' "$1" >&2; return 2; }
+        case $1 in
+          --model) model=$2 ;;
+          --status) status=$2 ;;
+          --since) since=$2 ;;
+          --text) query=$2 ;;
+          --max-score) max_score=$2 ;;
+        esac
+        shift 2 ;;
+      --json) json=1; shift ;;
+      *) printf '不明な条件: %s\n' "$1" >&2; return 2 ;;
+    esac
+  done
+  if [[ -n $max_score && ( ! $max_score =~ ^[0-9]+$ || $max_score -gt 100 ) ]]; then
+    printf '%s\n' '--max-score は 0〜100 の整数を指定してください' >&2
+    return 2
+  fi
+  [[ -f $history_file ]] || { printf '履歴はまだありません: %s\n' "$history_file"; return 0; }
+  local filtered_file summaries selected index judgments_source=$judge_file
+  [[ -f $judgments_source ]] || judgments_source=/dev/null
+  filtered_file=$(mktemp)
+  tmp_file_to_remove=$filtered_file
+  jq -c --slurpfile judgments "$judgments_source" --arg model "$model" \
+    --arg status "$status" --arg since "$since" --arg query "$query" \
+    --arg max_score "$max_score" '
+    . as $entry |
+    select($model == "" or ((.llm_model // "") | contains($model)) or ((.whisper_model // "") | contains($model))) |
+    select($status == "" or .cleanup_status == $status) |
+    select($since == "" or .timestamp >= $since) |
+    select($query == "" or ((.raw_text // "") | contains($query)) or ((.output_text // "") | contains($query))) |
+    . + {judge: ([$judgments[] | select(.record_id == $entry.id)] | last // null)} |
+    select($max_score == "" or (.judge.score != null and .judge.score <= ($max_score | tonumber)))
+  ' "$history_file" > "$filtered_file"
+  if ((json)); then
+    cat "$filtered_file"
+    return
+  fi
+  summaries=$(jq -r -s 'to_entries[] | [
+    (.key | tostring), .value.timestamp, .value.llm_model,
+    .value.cleanup_status,
+    (if .value.judge == null then "-" elif .value.judge.status == "ok" then (.value.judge.score | tostring) else "失敗" end),
+    (.value.total_ms | tostring),
+    (.value.output_text | gsub("[\\t\\r\\n]"; " ") | .[:100])
+  ] | @tsv' "$filtered_file")
+  [[ -n $summaries ]] || { printf '該当する履歴はありません\n'; return 0; }
+  if [[ -t 0 && -t 1 ]] && command -v fzf >/dev/null; then
+    selected=$(printf '%s\n' "$summaries" | fzf --tac --delimiter=$'\t' \
+      --with-nth=2..7 --header='日時 / モデル / 状態 / 評価点 / 全体ms / 入力文' \
+      --prompt='履歴> ') || return 0
+    [[ -n $selected ]] || return 0
+    index=${selected%%$'\t'*}
+    show_entry "$filtered_file" "$index"
+  else
+    printf '%s\n' "$summaries" | cut -f2-
+  fi
+}
+
+menu() {
+  if [[ ! -t 0 || ! -t 1 ]]; then usage; return; fi
+  command -v fzf >/dev/null || { printf 'fzf が必要です\n' >&2; return 1; }
+  local selected
+  selected=$(printf '%s\n' 'モデルを選ぶ' '履歴を見る' '低スコアを見る' '現在のモデルを見る' |
+    fzf --prompt='音声入力> ') || return 0
+  case $selected in
+    'モデルを選ぶ') choose_model ;;
+    '履歴を見る') show_logs ;;
+    '低スコアを見る') show_logs --max-score 69 ;;
+    '現在のモデルを見る') current_model ;;
+  esac
+}
+
+case ${1:-} in
+  '') menu ;;
+  model)
+    case ${2:-} in
+      '') choose_model ;;
+      show) current_model ;;
+      reset) rm -f "$model_file"; printf '既定モデル: %s\n' "$default_model" ;;
+      *) set_model "$2" ;;
+    esac ;;
+  logs) shift; show_logs "$@" ;;
+  help|-h|--help) usage ;;
+  *) usage >&2; exit 2 ;;
+esac

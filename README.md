@@ -1,15 +1,70 @@
 # voice-input
 
-`SUPER + H` で音声入力を開始し、もう一度押すと止める。録音中は現在の出力音量を20%に下げ、停止キーで元に戻す。停止後に録音全体を GPU の Whisper サーバーで文字起こしし、現在の入力先へ入力する。結果はクリップボードにもコピーする。IME が有効な場合は、入力中だけオフにしてから元に戻す。
+`SUPER + H` で音声入力を開始し、もう一度押すと止める。録音中は現在の出力音量を20%に下げ、停止キーで元に戻す。停止後に録音全体を GPU の Whisper サーバーで文字起こしし、ローカル LLM で清書してから現在の入力先へ入力する。結果はクリップボードにもコピーする。IME が有効な場合は、入力中だけオフにしてから元に戻す。
 
 ## 動作仕様
 
 1. 1回目の `SUPER + H` で録音を開始する。既定の出力先と音量を保存し、その出力先を元の20%に下げる。録音は `${XDG_RUNTIME_DIR}/voice-input/input.wav` に保存する。
 2. 2回目の `SUPER + H` で録音を止め、出力音量をすぐに戻す。録音中には文字を入力しない。
 3. 録音全体を `127.0.0.1:8082/inference` に送り、日本語・タイムスタンプなしのテキストを取得する。GPU 処理が失敗するか空の結果を返した場合は、HUD に切替を表示して CPU の small モデルで同じ録音を再処理する。
-4. 認識結果をクリップボードにコピーし、現在フォーカスしている入力先へ `wtype` で打ち込む。IME が有効なら打ち込み中だけ無効にする。HUD には状態だけを表示する。
+4. 10文字以上の認識結果はローカルの llama.cpp に送り、フィラーと言い直しの削除、句読点の調整を依頼する。15秒以内に清書できない場合や結果が空の場合は原文を使う。
+5. 最終結果をクリップボードにコピーし、現在フォーカスしている入力先へ `wtype` で打ち込む。IME が有効なら打ち込み中だけ無効にする。HUD には状態だけを表示する。
+6. 清書を適用した入力は、文字を返した後で別プロセスの評価モデルに渡す。評価待ちで文字入力を止めない。
 
-録音した WAV は次の録音開始時まで残る。変換の失敗内容は同じディレクトリの `gpu.log` または `cpu.log` に残る。
+録音した WAV は次の録音開始時まで残る。Whisper の原文は `transcript.txt`、清書に成功した結果は `transcript.cleaned.txt` に残る。変換の失敗内容は同じディレクトリの `gpu.log`、`cpu.log` または `cleanup.log` に残る。
+
+## 清書オプション
+
+清書は既定で有効。自宅で試し、職場などで無効にする場合は起動時に `VOICE_INPUT_CLEANUP=0 voice-input` を使う。Hyprland のキー割り当てから起動する場合は、その割り当てのコマンドにも同じ環境変数を付ける。短い発話は設定に関係なく清書しない。
+
+既定では `127.0.0.1:8080/v1/chat/completions` の `gemma-4-E4B-it-qat` を使う。`voice-inputctl model` でサーバー上のモデルを選ぶと、次の音声入力から切り替わる。設定は `${XDG_CONFIG_HOME:-$HOME/.config}/voice-input/model` に保存する。`VOICE_INPUT_LLM_MODEL` が指定されていればそちらを優先する。接続先を変える場合は `VOICE_INPUT_LLM_URL` を指定し、一覧の接続先は `VOICE_INPUT_LLM_BASE_URL` で変える。モデルの読み込み時間も含めて15秒で打ち切り、Whisper の原文を入力する。清書は意味の取り違えがあり得るため、固有名詞・数字・指示文は使用前に確認する。
+
+## モデルと履歴の操作
+
+`voice-inputctl` は端末で動く操作画面。`fzf` と `jq` を使い、Web サーバーは不要。
+
+```sh
+voice-inputctl                      # メニューを開く
+voice-inputctl model                # llama-server の一覧からモデルを選ぶ
+voice-inputctl model show           # 現在のモデルを表示
+voice-inputctl model reset          # 既定の Gemma に戻す
+voice-inputctl logs                 # 履歴から1件選び、原文と入力文を表示
+voice-inputctl logs --since 2026-10-21 --model gemma --status applied --text 会議
+voice-inputctl logs --max-score 69  # 評価が低い入力だけ表示
+voice-inputctl logs --json          # 絞り込んだ履歴を JSONL で出力
+```
+
+`model` の一覧にはサーバーが公開する全モデルが出るので、清書に使える会話モデルを選ぶ。端末のない実行環境では `voice-inputctl model モデルID` で直接指定できる。履歴は端末なら `fzf` で選択し、パイプなどでは一覧を TSV で出す。
+
+## 清書の評価
+
+清書を適用した入力は、文字入力後に判断モデル Laya Q8（`laya-q8`）で原文と清書文を比較する。llama.cpp の `/v1/systemone` に5段階の `score` 質問を送り、返った期待値を0〜100点に換算する。判定段階と各段階の確率も保存する。69点以下は確認候補として `voice-inputctl` の「低スコアを見る」または `voice-inputctl logs --max-score 69` で見られる。点数はこの用途で校正したものではなく、音声からの文字起こし精度も判定できない。[Laya のモデルカード](https://huggingface.co/ggml-org/Laya-GGUF)、[llama.cpp の API 仕様](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md#post-v1systemone-typesafe-compatible-system-one-api)。
+
+評価は `${XDG_STATE_HOME:-$HOME/.local/state}/voice-input/judgments.jsonl` に保存する。`reason` は生成された説明ではなく、最も確率の高い判定段階のラベル。評価前の履歴は「未評価」、失敗時は「失敗」と表示する。`VOICE_INPUT_JUDGE_MODEL` で判断モデル、`VOICE_INPUT_JUDGE_URL` で API の接続先を指定でき、`VOICE_INPUT_JUDGE=0` で評価を無効にできる。履歴を無効にした場合も評価は動かない。Laya は `~/.config/llama.cpp/models.ini` の `laya-q8` プリセットに登録済み。llama-server は2モデルを同時保持し、Gemma と Laya を載せた実測 GPU 使用量は Whisper 込みで約8.2GB / 12GB。
+
+このマシンの `models.ini` には次のプリセットを追加した。Laya は CPU で動かす。
+
+```ini
+[laya-q8]
+ui = false
+hf = ggml-org/Laya-GGUF:Q8_0
+n-gpu-layers = 0
+batch-size = 512
+ubatch-size = 512
+```
+
+`llama.cpp.service` では既存の `--models-preset` にこのファイルの絶対パスを指定し、`--models-max 2` を付ける。設定を変えたら `systemctl --user daemon-reload` と `systemctl --user restart llama.cpp.service` を実行する。
+
+## 入力履歴
+
+入力が完了するたびに `${XDG_STATE_HOME:-$HOME/.local/state}/voice-input/history.jsonl` へ1行の JSON を追記する。`id` は評価ログとの照合に使う。`raw_text` は Whisper の原文、`output_text` は実際に入力した文。`whisper_model` と `llm_model` はモデル名、`cleanup_status` は `applied`（清書適用）、`failed`（清書失敗）、`short`（短文）、`disabled`（無効）、`unavailable`（jq なし）のいずれか。`whisper_ms`、`cleanup_ms`、`total_ms` はミリ秒で、全体時間は録音停止後の処理開始から文字入力完了までを測る。評価時間は `judgments.jsonl` の `judge_ms` に別記録する。Whisper が CPU に切り替わった場合の `whisper_ms` には GPU の試行も含む。Whisper サーバー側のモデル名を変えた場合は `VOICE_INPUT_WHISPER_MODEL` も合わせる。
+
+```sh
+jq -r '[.timestamp, .whisper_model, .llm_model, .cleanup_status, .whisper_ms, .cleanup_ms, .total_ms, .raw_text, .output_text] | @tsv' \
+  "${XDG_STATE_HOME:-$HOME/.local/state}/voice-input/history.jsonl"
+```
+
+履歴には発話内容が含まれるため、保存先ディレクトリを `700`、ファイルを `600` にする。職場などで履歴を残したくない場合は、起動コマンドに `VOICE_INPUT_LOG=0` を付ける。Whisper や文字入力が失敗した試行は履歴に追加しない。
 
 ## 実行環境
 
@@ -17,6 +72,7 @@
 - 実際に呼ばれるファイルは `~/.local/bin/voice-input`。このディレクトリの `voice-input` が編集用の原本。
 - 録音に `pw-record`、文字起こしにローカルの `whisper-server` を使う。GPU 側は `${XDG_DATA_HOME:-$HOME/.local/share}/whisper/ggml-medium-q8_0.bin`（`ggml-medium.bin` を `q8_0` に量子化したもの）、CPU への切替時は `ggml-small.bin` を使う。サーバーと CPU 版 CLI はパッケージ版の `/usr/bin/whisper-server` と `/usr/bin/whisper-cli`。
 - 出力音量の変更と復元には `wpctl` を使う。録音開始時の出力先と音量を保存するため、途中で既定の出力先を変更しても元の出力先へ戻す。
+- 清書にローカルの `llama-server` と `jq` を使う。サーバーが停止していても原文入力に戻る。
 - 結果の入力に `wl-copy`、`wtype`、`fcitx5-remote` を使う。
 
 ## CUDA 版 Whisper サーバー
@@ -121,7 +177,7 @@ sudo pacman -S --needed shellcheck bats
 make test
 ```
 
-`make test` は `shellcheck voice-input` の後に `tests/voice-input.bats` を実行する。GitHub Actions（`.github/workflows/test.yml`）でも push と pull request のたびに同じ `make test` を Ubuntu 上で実行する。テストでは `wpctl`、`pw-record`、`hyprctl`、`curl`、`whisper-cli`、`wl-copy`、`wtype`、`fcitx5-remote`、`hud`、`hud-status` を偽のコマンドに置き換える。実際の録音、GPU、Hyprland、入力先は使わない。`HOME` と `XDG_RUNTIME_DIR` もテストごとの一時ディレクトリに向けるので、実行中の音声入力の状態には触れない。CPU 版 CLI のパスは環境変数 `VOICE_INPUT_WHISPER_CLI` で差し替える（既定は `/usr/bin/whisper-cli`）。
+`make test` は `shellcheck voice-input voice-inputctl voice-input-judge` の後に `tests/voice-input.bats` を実行する。GitHub Actions（`.github/workflows/test.yml`）でも push と pull request のたびに同じ `make test` を Ubuntu 上で実行する。テストでは `wpctl`、`pw-record`、`hyprctl`、`curl`、`whisper-cli`、`wl-copy`、`wtype`、`fcitx5-remote`、`hud`、`hud-status` を偽のコマンドに置き換える。実際の録音、GPU、Hyprland、入力先は使わない。`HOME`、`XDG_RUNTIME_DIR`、`XDG_STATE_HOME`、`XDG_CONFIG_HOME` もテストごとの一時ディレクトリに向けるので、実行中の音声入力の状態には触れない。CPU 版 CLI のパスは環境変数 `VOICE_INPUT_WHISPER_CLI` で差し替える（既定は `/usr/bin/whisper-cli`）。清書と履歴の成功・失敗・無効化、モデル設定、評価の記録と絞り込みを確認する。
 
 主に確かめている内容:
 
@@ -135,8 +191,8 @@ make test
 このディレクトリのスクリプトを編集したら、実行先へコピーする。
 
 ```sh
-cp voice-input ~/.local/bin/
-chmod +x ~/.local/bin/voice-input
+mkdir -p ~/.local/bin
+install -m 755 voice-input voice-inputctl voice-input-judge ~/.local/bin/
 ```
 
 次の `SUPER + H` から新しい内容が使われる。`cli-hud` 側の表示文言や更新間隔を変える場合は `~/.config/quickshell/cli-hud/shell.qml`、状態の判定を変える場合は `~/.local/bin/hud-probe` を編集する。

@@ -1,5 +1,34 @@
 # 作業計画・記録・引き継ぎ
 
+## 作業計画（2026-10-21: 清書後の評価）
+
+- [x] 文字入力後に Laya 判断モデルで清書の意味保持を採点する。
+- [x] 評価点・判定段階・確率・モデル名・所要時間を入力履歴と照合できる形で保存する。
+- [x] 低スコアの絞り込みを操作画面へ追加し、失敗時も入力を妨げないことをテストする。
+- [x] Laya Q8 を一時サーバーと本番ルーターで試し、正誤例の点数と所要時間を確認する。
+- [ ] 実際の発話を使って点数の妥当性を確認する。
+
+## 作業計画（2026-10-21: モデル切替と履歴閲覧）
+
+- [x] 端末から清書モデルを選び、次の音声入力から使えるようにする。
+- [x] 日付・モデル・清書状態・本文で履歴を絞り込み、原文と入力文を確認できるようにする。
+- [x] テスト、README、実行ファイルを更新する。
+
+## 作業計画（2026-10-21: 入力履歴）
+
+- [x] 原文・入力文・Whisper/LLM モデル名・清書状態を JSONL に記録する。
+- [x] Whisper・清書・全体の所要時間をミリ秒で記録する。
+- [x] 履歴の無効化と保存先の権限を設定し、テストと README を更新する。
+- [ ] 実際の発話後の履歴でモデル名と時間を確認する。
+
+## 作業計画（2026-10-21: 音声認識後の清書）
+
+- [x] Whisper の原文を残し、llama.cpp による清書を既定で有効にする。
+- [x] `VOICE_INPUT_CLEANUP=0` で無効化し、短文・接続失敗・空の結果では原文を使う。
+- [x] 成功、失敗、無効化、短文の自動テストと README を更新する。
+- [x] VOICEVOX の合成音声で Whisper → 清書の品質と待ち時間を確認する。
+- [ ] 実際の発話で清書の品質と待ち時間を確認する。
+
 ## 作業計画（2026-10-20: GPU モデルの量子化）
 
 - [x] `whisper-quantize` で `ggml-medium.bin` を `q8_0` / `q5_0` に量子化し、VRAM・速度・日本語精度を比べる。
@@ -24,6 +53,13 @@
 
 ## 作業記録
 
+- 2026-10-21: `voice-input` に llama.cpp の清書を追加。既定は `gemma-4-E4B-it-qat`、15秒で打ち切り、失敗時は原文を入力する。VOICEVOX の合成音声では、言い直しを含む発話を正しく清書した（モデル切替込み初回10.42秒、2回目1.76秒）。実際の発話での品質は未確認。
+- 2026-10-21: 入力履歴を `history.jsonl` に追記。原文・入力文・モデル名・清書状態・Whisper/清書/全体の所要時間を記録し、保存先を `700`/`600` に設定。`VOICE_INPUT_LOG=0` で無効化できる。
+- 2026-10-21: `voice-inputctl` を追加。`fzf` で清書モデルを選んで保存し、履歴を日付・モデル・状態・本文・評価点で絞り込める。
+- 2026-10-21: `voice-input-judge` を追加。入力を返した後、Laya Q8 の `/v1/systemone` で原文と清書文を5段階評価し、期待値を0〜100点に換算する。判定段階・各段階の確率・所要時間を `judgments.jsonl` に記録する。`reason` は生成した説明ではなく、最大確率の段階名。
+- 2026-10-21: 当初 Ornith を評価に使ったが、判断専用モデルではなかったため Laya に変更。`~/.config/llama.cpp/models.ini` に `laya-q8` を追加し、llama.cpp user service を `--models-max 2` に変更して再起動。Gemma と Laya は同時保持でき、Whisper 込みの GPU 使用量は 8206 / 12288 MiB（Whisper 1294、Gemma 6208、Laya 150 MiB）。
+- 2026-10-21: 合成例を本番ルーターで評価し、正しい清書82点（約997ms）、曜日と時刻を誤った清書5点（約82ms）。実際の発話と幅広い例での点数校正は未実施。
+- 2026-10-21: `make test` で shellcheck と29件の Bats テストが通過。3コマンドを `~/.local/bin/` に配置して原本との一致を確認。
 - `systemd/user/voice-input-whisper.service` で CUDA 版 `whisper-server` を起動。ポートは `8082`。
 - 随時入力は短い区間で文脈が切れ、停止キーと文字入力も干渉したため、一括入力へ変更。
 - 認識結果が `-` で始まっても扱えるよう、`wtype` と `wl-copy` に標準入力から渡す。
@@ -45,6 +81,14 @@
 
 ## 引き継ぎ
 
+- 清書が適用され、履歴記録に成功した入力だけ Laya Q8 の `/v1/systemone` で評価する。`VOICE_INPUT_JUDGE=0` で停止、`VOICE_INPUT_JUDGE_MODEL` と `VOICE_INPUT_JUDGE_URL` で変更できる。評価は別プロセスで動き、`judgments.jsonl` に記録する。llama-server は `--models-max 2`。サービス変更前のファイルは `~/.config/systemd/user/llama.cpp.service.bak-before-voice-input-two-models`。
+- Laya のモデル設定は `~/.config/llama.cpp/models.ini` の `[laya-q8]`。設定変更前のバックアップは `~/.config/llama.cpp/models.ini.bak-before-laya-voice-input`。
+- `voice-inputctl` は `fzf` と `jq` が必要。`voice-inputctl model` でモデル選択、`voice-inputctl logs` で履歴選択。端末のない場面では `voice-inputctl model ID` と `voice-inputctl logs --json` を使える。`VOICE_INPUT_LLM_BASE_URL` でモデル一覧の接続先を変えられる。
+- 選択したモデルは `~/.config/voice-input/model` に保存し、次の音声入力から使う。環境変数 `VOICE_INPUT_LLM_MODEL` が設定されている場合はそちらを優先する。
+- 履歴は自動で追記される。保存先は `~/.local/state/voice-input/history.jsonl`（`XDG_STATE_HOME` があればそちら）。職場で残さない場合は起動コマンドに `VOICE_INPUT_LOG=0` を付ける。
+- Whisper サーバー側のモデルを変えた場合は、起動コマンドの `VOICE_INPUT_WHISPER_MODEL` も変更する。CPU 切替時は CLI のモデルファイル名を自動記録する。
+- 清書は既定で有効。職場では起動コマンドに `VOICE_INPUT_CLEANUP=0` を付ける。`jq` が必要。llama-server が使えないときは原文を入力する。
+- llama-server は `models-max 2`。Gemma と Laya は同時保持できる。合成音声での Gemma 4 E4B は初回10.42秒、2回目1.76秒。実際の発話で遅い場合はモデルやタイムアウトを調整する。
 - 実行ファイルは `~/.local/bin/voice-input`。変更時は `README.md` の手順でコピーする。
 - GPU は `ggml-medium-q8_0.bin`（`ggml-medium.bin` から `whisper-quantize` で作成）、CPU 切替時は `ggml-small.bin`。サーバーは user service で起動する。
 - 状態と録音は `${XDG_RUNTIME_DIR}/voice-input/`。失敗時は `gpu.log`、`cpu.log` を見る。

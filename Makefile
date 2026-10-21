@@ -4,4 +4,4 @@ test: lint
 	bats tests
 
 lint:
-	shellcheck voice-input
+	shellcheck voice-input voice-inputctl voice-input-judge

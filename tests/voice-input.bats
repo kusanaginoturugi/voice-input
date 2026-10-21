@@ -347,6 +347,16 @@ MOCK
   ' "$XDG_STATE_HOME/voice-input/history.jsonl"
 }
 
+@test "清書結果の改行はスペースに変えて、Enter を押さない" {
+  unset VOICE_INPUT_CLEANUP
+  MOCK_GPU_TEXT='明日の会議は水曜日です。場所は第2会議室です。'
+  MOCK_LLM_TEXT=$'明日の会議は水曜日です。\n場所は第2会議室です。'
+  start_fake_recording
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$T/typed")" = '明日の会議は水曜日です。 場所は第2会議室です。' ]
+}
+
 @test "清書を無効にすると LLM を呼ばず原文を入力する" {
   MOCK_GPU_TEXT='えーと、そのまま入力します。'
   start_fake_recording

@@ -109,3 +109,11 @@ mock() {
   grep -q '^wl-copy' "$T/calls"
   ! grep -q '^wtype' "$T/calls"
 }
+
+@test "改行はスペースに変えて、Enter を押さない" {
+  MOCK_LLM_TEXT=$'明日の会議は水曜日です。\n場所は第2会議室です。\n' run "$SCRIPT" --file "$T/audio.wav"
+  [ "$status" -eq 0 ]
+  [ "$output" = '明日の会議は水曜日です。 場所は第2会議室です。' ]
+  grep -qx 'wtype 明日の会議は水曜日です。 場所は第2会議室です。' "$T/calls"
+  grep -qx 'wl-copy 明日の会議は水曜日です。 場所は第2会議室です。' "$T/calls"
+}

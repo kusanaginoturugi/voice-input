@@ -62,7 +62,7 @@ stop_recording() {
 }
 
 transcribe() {
-  # パイプの途中で curl の失敗が消えないよう、先に結果を受け取ってから整える
+  # パイプの途中で curl の失敗が消えないよう、先に結果を受け取ってから整える（改行は output() で消す）
   raw=$(curl --fail --silent --show-error --max-time 300 \
     -F "file=@$1;type=audio/wav" -F "language=$language" \
     -F 'no_timestamps=true' -F 'response_format=text' \
@@ -87,6 +87,8 @@ clean_up() {
 }
 
 output() {
+  # 改行は打ち込むと Enter になり、チャットなどではその場で送信されてしまう。スペースに変えて 1 行にする
+  set -- "$(printf '%s' "$1" | tr '\r\n' '  ' | sed 's/^ *//; s/ *$//')"
   printf '%s\n' "$1"
   if have wl-copy; then printf '%s' "$1" | wl-copy
   elif have xclip; then printf '%s' "$1" | xclip -selection clipboard

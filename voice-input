@@ -163,6 +163,8 @@ if [ -f "$pid_file" ]; then
       "$llm_url" -o "$state_dir/cleanup-response.json" 2>"$state_dir/cleanup.log"; then
       cleaned=$(jq -er '.choices[0].message.content | fromjson | .text | select(type == "string" and length > 0)' \
         "$state_dir/cleanup-response.json" 2>/dev/null) || cleaned=
+      # 改行は打ち込むと Enter になり、その場で送信するアプリがあるので、原文と同じくスペースに変える
+      cleaned=$(printf '%s' "$cleaned" | tr '\r\n' '  ')
       if [ -n "$cleaned" ]; then
         printf '%s\n' "$cleaned" > "$text_base.cleaned.txt"
         transcript=$cleaned

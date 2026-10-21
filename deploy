@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -gt 1 ]; then
+  printf 'Usage: %s [install-dir]\n' "$0" >&2
+  exit 2
+fi
+
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+install_dir=${1:-"$HOME/.local/bin"}
+
+mkdir -p -- "$install_dir"
+install -m 755 -- \
+  "$script_dir/voice-input" \
+  "$script_dir/voice-inputctl" \
+  "$script_dir/voice-input-judge" \
+  "$install_dir/"
+
+printf 'Installed voice-input, voice-inputctl, voice-input-judge to %s\n' "$install_dir"

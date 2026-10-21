@@ -177,7 +177,7 @@ sudo pacman -S --needed shellcheck bats
 make test
 ```
 
-`make test` は `shellcheck voice-input voice-inputctl voice-input-judge` の後に `tests/voice-input.bats` を実行する。GitHub Actions（`.github/workflows/test.yml`）でも push と pull request のたびに同じ `make test` を Ubuntu 上で実行する。テストでは `wpctl`、`pw-record`、`hyprctl`、`curl`、`whisper-cli`、`wl-copy`、`wtype`、`fcitx5-remote`、`hud`、`hud-status` を偽のコマンドに置き換える。実際の録音、GPU、Hyprland、入力先は使わない。`HOME`、`XDG_RUNTIME_DIR`、`XDG_STATE_HOME`、`XDG_CONFIG_HOME` もテストごとの一時ディレクトリに向けるので、実行中の音声入力の状態には触れない。CPU 版 CLI のパスは環境変数 `VOICE_INPUT_WHISPER_CLI` で差し替える（既定は `/usr/bin/whisper-cli`）。清書と履歴の成功・失敗・無効化、モデル設定、評価の記録と絞り込みを確認する。
+`make test` は `shellcheck voice-input voice-inputctl voice-input-judge deploy` の後に `tests/voice-input.bats` を実行する。GitHub Actions（`.github/workflows/test.yml`）でも push と pull request のたびに同じ `make test` を Ubuntu 上で実行する。テストでは `wpctl`、`pw-record`、`hyprctl`、`curl`、`whisper-cli`、`wl-copy`、`wtype`、`fcitx5-remote`、`hud`、`hud-status` を偽のコマンドに置き換える。実際の録音、GPU、Hyprland、入力先は使わない。`HOME`、`XDG_RUNTIME_DIR`、`XDG_STATE_HOME`、`XDG_CONFIG_HOME` もテストごとの一時ディレクトリに向けるので、実行中の音声入力の状態には触れない。CPU 版 CLI のパスは環境変数 `VOICE_INPUT_WHISPER_CLI` で差し替える（既定は `/usr/bin/whisper-cli`）。清書と履歴の成功・失敗・無効化、モデル設定、評価の記録と絞り込みを確認する。
 
 主に確かめている内容:
 
@@ -188,11 +188,11 @@ make test
 
 ## 変更の反映
 
-このディレクトリのスクリプトを編集したら、実行先へコピーする。
+このディレクトリのスクリプトを編集したら、`deploy` で3コマンドを `~/.local/bin/` に反映する。別の配置先を使う場合は引数で指定できる。
 
 ```sh
-mkdir -p ~/.local/bin
-install -m 755 voice-input voice-inputctl voice-input-judge ~/.local/bin/
+./deploy
+# 配置先を変える場合: ./deploy /path/to/bin
 ```
 
 次の `SUPER + H` から新しい内容が使われる。`cli-hud` 側の表示文言や更新間隔を変える場合は `~/.config/quickshell/cli-hud/shell.qml`、状態の判定を変える場合は `~/.local/bin/hud-probe` を編集する。

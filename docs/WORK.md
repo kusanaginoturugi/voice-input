@@ -1,5 +1,12 @@
 # 作業計画・記録・引き継ぎ
 
+## 作業計画（2026-10-21: 配置の一本化）
+
+- [x] 3コマンドを一度に配置する `deploy` を追加し、作業ディレクトリに依存しないようにする。
+- [x] lint と README の配置手順を更新する。
+- [x] `make test` と一時ディレクトリへの配置を確認する。
+- [x] `~/.local/bin` に反映して原本との一致を確認する。
+
 ## 作業計画（2026-10-21: 清書後の評価）
 
 - [x] 文字入力後に Laya 判断モデルで清書の意味保持を採点する。
@@ -53,6 +60,7 @@
 
 ## 作業記録
 
+- 2026-10-21: `deploy` を追加。`voice-input`、`voice-inputctl`、`voice-input-judge` を既定で `~/.local/bin/` に配置する。任意の配置先を引数で指定できる。`make test` で29件通過。別ディレクトリから一時配置先への実行と、実配置先の3ファイルの原本一致・実行権限を確認。
 - 2026-10-21: `voice-input` に llama.cpp の清書を追加。既定は `gemma-4-E4B-it-qat`、15秒で打ち切り、失敗時は原文を入力する。VOICEVOX の合成音声では、言い直しを含む発話を正しく清書した（モデル切替込み初回10.42秒、2回目1.76秒）。実際の発話での品質は未確認。
 - 2026-10-21: 入力履歴を `history.jsonl` に追記。原文・入力文・モデル名・清書状態・Whisper/清書/全体の所要時間を記録し、保存先を `700`/`600` に設定。`VOICE_INPUT_LOG=0` で無効化できる。
 - 2026-10-21: `voice-inputctl` を追加。`fzf` で清書モデルを選んで保存し、履歴を日付・モデル・状態・本文・評価点で絞り込める。
@@ -89,7 +97,7 @@
 - Whisper サーバー側のモデルを変えた場合は、起動コマンドの `VOICE_INPUT_WHISPER_MODEL` も変更する。CPU 切替時は CLI のモデルファイル名を自動記録する。
 - 清書は既定で有効。職場では起動コマンドに `VOICE_INPUT_CLEANUP=0` を付ける。`jq` が必要。llama-server が使えないときは原文を入力する。
 - llama-server は `models-max 2`。Gemma と Laya は同時保持できる。合成音声での Gemma 4 E4B は初回10.42秒、2回目1.76秒。実際の発話で遅い場合はモデルやタイムアウトを調整する。
-- 実行ファイルは `~/.local/bin/voice-input`。変更時は `README.md` の手順でコピーする。
+- 実行ファイルは `~/.local/bin/` の3コマンド。変更時はリポジトリの `./deploy` で反映する。
 - GPU は `ggml-medium-q8_0.bin`（`ggml-medium.bin` から `whisper-quantize` で作成）、CPU 切替時は `ggml-small.bin`。サーバーは user service で起動する。
 - 状態と録音は `${XDG_RUNTIME_DIR}/voice-input/`。失敗時は `gpu.log`、`cpu.log` を見る。
 - Hyprland のユーザー設定 `~/.config/hypr/hyprland.lua` で `input.virtualkeyboard.share_states = 0` にしている。このファイルは本リポジトリ外。

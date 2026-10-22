@@ -20,6 +20,7 @@ fi
 llm_model="${VOICE_INPUT_LLM_MODEL:-$llm_model_default}"
 log_enabled="${VOICE_INPUT_LOG:-1}"
 judge_enabled="${VOICE_INPUT_JUDGE:-1}"
+ime_restore_ms_per_char="${VOICE_INPUT_IME_RESTORE_MS_PER_CHAR:-5}"
 judge_cmd="${VOICE_INPUT_JUDGE_CMD:-$HOME/.local/bin/voice-input-judge}"
 log_dir="${XDG_STATE_HOME:-$HOME/.local/state}/voice-input"
 log_file="$log_dir/history.jsonl"
@@ -182,7 +183,13 @@ if [ -f "$pid_file" ]; then
   fi
   printf '%s' "$transcript" | wtype -
   if [ "$ime_state" = 2 ]; then
-    sleep 0.05
+    # wtype はキーを送り終えた時点で戻るが、アプリが受け取り終えるのはその後になる。
+    # 受け取り終えたかは外から分からないので、文が長いほど長めに待ってから IME を戻す
+    # （早く戻すと、残りの文字が SKK を通って崩れる）
+    chars=$(printf '%s' "$transcript" | wc -m)
+    wait_ms=$(( 50 + chars * ime_restore_ms_per_char ))
+    [ "$wait_ms" -le 3000 ] || wait_ms=3000
+    sleep "$((wait_ms / 1000)).$(printf '%03d' $((wait_ms % 1000)))"
     fcitx5-remote -o
     restore_ime=0
   fi

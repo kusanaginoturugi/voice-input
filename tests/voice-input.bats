@@ -295,6 +295,21 @@ MOCK
   [ "$(line_of wtype)" -lt "$(line_of 'fcitx5-remote -o')" ]
 }
 
+@test "IME を戻すまでの待ち時間は文が長いほど延びる" {
+  MOCK_IME=2
+  MOCK_GPU_TEXT=$(printf 'あ%.0s' $(seq 200))
+  MOCK_LLM_TEXT=$MOCK_GPU_TEXT
+  start_fake_recording
+  mock sleep <<'EOF'
+echo "sleep $*" >> "$T/calls"
+EOF
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  called 'sleep 1.055'  # 50 ミリ秒 + 201 文字（Whisper の末尾の改行を変えた空白を含む）× 5 ミリ秒
+  [ "$(line_of wtype)" -lt "$(line_of 'sleep 1.055')" ]
+  [ "$(line_of 'sleep 1.055')" -lt "$(line_of 'fcitx5-remote -o')" ]
+}
+
 @test "IME が無効なら IME を操作しない" {
   start_fake_recording
   run "$SCRIPT"

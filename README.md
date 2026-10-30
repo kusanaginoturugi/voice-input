@@ -89,7 +89,7 @@ jq -r '[.timestamp, .whisper_model, .llm_model, .cleanup_status, .whisper_ms, .c
 
 ## 実行環境
 
-- Hyprland の設定で `SUPER + H` に `voice-input` を割り当てる。設定ファイルはマシンによって違い、`~/.config/hypr/binds-omarchy.lua` または `~/.config/hypr/hyprland.lua` に置いている。
+- Hyprland の設定で `SUPER + H` に `env VOICE_INPUT_CLEANUP=2 voice-input`（フィラーだけ消すモード）を割り当てる。設定ファイルはマシンによって違い、`~/.config/hypr/binds-omarchy.lua` または `~/.config/hypr/hyprland.lua` に置いている。
 - 実際に呼ばれるファイルは `~/.local/bin/voice-input`。このディレクトリの `voice-input` が編集用の原本。
 - 録音に `pw-record`、文字起こしにローカルの `whisper-server` を使う。GPU 側は `${XDG_DATA_HOME:-$HOME/.local/share}/whisper/ggml-medium-q8_0.bin`（`ggml-medium.bin` を `q8_0` に量子化したもの）、CPU への切替時は `ggml-small.bin` を使う。サーバーと CPU 版 CLI はパッケージ版の `/usr/bin/whisper-server` と `/usr/bin/whisper-cli`。
 - 出力音量の変更と復元には `wpctl` を使う。録音開始時の出力先と音量を保存するため、途中で既定の出力先を変更しても元の出力先へ戻す。

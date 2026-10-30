@@ -375,8 +375,19 @@ EOF
   [ "$(cat "$T/typed")" = '-から始まる 二行目 ' ]
 }
 
-@test "清書は既定で有効で、原文を残して清書結果を入力する" {
+@test "清書は既定で無効で、LLM を呼ばず原文を入力する" {
   unset VOICE_INPUT_CLEANUP
+  MOCK_GPU_TEXT='えーと、火曜日、違った、水曜日の会議です。'
+  start_fake_recording
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  ! called 'curl llm' || false
+  [ "$(cat "$T/typed")" = "$MOCK_GPU_TEXT " ]
+  [ "$(jq -r '.cleanup_status' "$XDG_STATE_HOME/voice-input/history.jsonl")" = disabled ]
+}
+
+@test "VOICE_INPUT_CLEANUP=1 なら原文を残して清書結果を入力する" {
+  VOICE_INPUT_CLEANUP=1
   MOCK_GPU_TEXT='えーと、火曜日、違った、水曜日の会議です。'
   MOCK_LLM_TEXT='水曜日の会議です。'
   start_fake_recording
@@ -403,7 +414,7 @@ EOF
 }
 
 @test "清書結果の改行はスペースに変えて、Enter を押さない" {
-  unset VOICE_INPUT_CLEANUP
+  VOICE_INPUT_CLEANUP=1
   MOCK_GPU_TEXT='明日の会議は水曜日です。場所は第2会議室です。'
   MOCK_LLM_TEXT=$'明日の会議は水曜日です。\n場所は第2会議室です。'
   start_fake_recording

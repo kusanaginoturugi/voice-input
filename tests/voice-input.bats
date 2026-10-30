@@ -30,6 +30,7 @@ setup() {
   export MOCK_CLI=ok
   export MOCK_IME=1
   export MOCK_WTYPE=ok
+  export MOCK_PASTE=ok
   export VOICE_INPUT_CLEANUP=0
   export VOICE_INPUT_LOG=1
   export MOCK_LLM=ok
@@ -57,6 +58,12 @@ case "$1" in
       *reset*) echo reset > "$T/submap" ;;
     esac ;;
   submap) cat "$T/submap" ;;
+  eval)
+    echo "hyprctl eval $2" >> "$T/calls"
+    [ "$MOCK_PASTE" = ok ] || { echo 'error: voice_input_paste is nil'; exit 7; }
+    case "$2" in
+      voice_input_paste\(\)) cp "$T/clipboard" "$T/typed" ;;
+    esac ;;
 esac
 EOF
   mock curl <<'EOF'
@@ -114,6 +121,8 @@ EOF
   mock wl-copy <<'EOF'
 echo wl-copy >> "$T/calls"
 cat > "$T/clipboard"
+cat "$T/clipboard" >> "$T/clipboard-history"
+echo >> "$T/clipboard-history"
 EOF
   mock wtype <<'EOF'
 echo wtype >> "$T/calls"
@@ -236,8 +245,8 @@ MOCK
   [ "$(cat "$T/submap")" = reset ]
   called 'hud-status clear voice-input'
   # 文字入力は typing submap の中で行う
-  [ "$(line_of 'hyprctl hl.dsp.submap("voice_input_typing")')" -lt "$(line_of wtype)" ]
-  [ "$(line_of wtype)" -lt "$(line_of 'hyprctl hl.dsp.submap("reset")')" ]
+  [ "$(line_of 'hyprctl hl.dsp.submap("voice_input_typing")')" -lt "$(line_of 'hyprctl eval voice_input_paste()')" ]
+  [ "$(line_of 'hyprctl eval voice_input_paste()')" -lt "$(line_of 'hyprctl hl.dsp.submap("reset")')" ]
 }
 
 @test "GPU が失敗したら HUD に表示して CPU で再処理する" {
@@ -268,6 +277,7 @@ MOCK
   run "$SCRIPT"
   [ "$status" -eq 1 ]
   called 'hud -s off --no-voice 音声入力: VRAM不足で処理できません'
+  [ ! -f "$T/typed" ]
   ! called wtype || false
   [ "$(cat "$T/submap")" = reset ]
   [ ! -f "$state/hud-status" ]
@@ -280,13 +290,15 @@ MOCK
   start_fake_recording
   run "$SCRIPT"
   [ "$status" -eq 1 ]
+  [ ! -f "$T/typed" ]
   ! called wtype || false
   [ "$(cat "$T/submap")" = reset ]
   [ ! -f "$state/hud-status" ]
   called 'wpctl set-volume 42 0.80'
 }
 
-@test "IME が有効なら入力中だけ無効にする" {
+@test "貼り付けが使えなければ wtype で打ち、IME が有効なら入力中だけ無効にする" {
+  MOCK_PASTE=missing
   MOCK_IME=2
   start_fake_recording
   run "$SCRIPT"
@@ -295,7 +307,8 @@ MOCK
   [ "$(line_of wtype)" -lt "$(line_of 'fcitx5-remote -o')" ]
 }
 
-@test "IME を戻すまでの待ち時間は文が長いほど延びる" {
+@test "貼り付けが使えなければ wtype で打ち、IME を戻すまでの待ち時間は文が長いほど延びる" {
+  MOCK_PASTE=missing
   MOCK_IME=2
   MOCK_GPU_TEXT=$(printf 'あ%.0s' $(seq 200))
   MOCK_LLM_TEXT=$MOCK_GPU_TEXT
@@ -310,14 +323,16 @@ EOF
   [ "$(line_of 'sleep 1.055')" -lt "$(line_of 'fcitx5-remote -o')" ]
 }
 
-@test "IME が無効なら IME を操作しない" {
+@test "貼り付けが使えず IME が無効なら IME を操作しない" {
+  MOCK_PASTE=missing
   start_fake_recording
   run "$SCRIPT"
   [ "$status" -eq 0 ]
   ! grep -q '^fcitx5-remote' "$T/calls" || false
 }
 
-@test "入力に失敗しても IME と submap を元に戻す" {
+@test "貼り付けが使えなければ wtype で打ち、入力に失敗しても IME と submap を元に戻す" {
+  MOCK_PASTE=missing
   MOCK_IME=2
   MOCK_WTYPE=fail
   start_fake_recording
@@ -326,6 +341,29 @@ EOF
   called 'fcitx5-remote -o'
   [ "$(cat "$T/submap")" = reset ]
   [ ! -f "$state/hud-status" ]
+}
+
+@test "貼り付けが使えれば wtype も IME も使わずに貼り付ける" {
+  MOCK_IME=2
+  start_fake_recording
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$T/typed")" = 'GPUの結果 ' ]
+  called 'hyprctl eval voice_input_paste()'
+  ! called wtype || false
+  ! grep -q '^fcitx5-remote' "$T/calls" || false
+  # 清書しないときは原文を1回だけコピーする
+  [ "$(grep -c '^wl-copy$' "$T/calls")" -eq 1 ]
+}
+
+@test "貼り付けが使えなければ wtype で入力する" {
+  MOCK_PASTE=missing
+  start_fake_recording
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$T/typed")" = 'GPUの結果 ' ]
+  called wtype
+  ! called 'hyprctl eval voice_input_paste()' || false
 }
 
 @test "改行は空白にし、- で始まる文もそのまま入力する" {
@@ -346,7 +384,9 @@ EOF
   [ "$status" -eq 0 ]
   called 'curl llm'
   [ "$(cat "$T/typed")" = '水曜日の会議です。' ]
-  [ "$(cat "$T/clipboard")" = "$MOCK_GPU_TEXT " ]
+  # 原文を先にコピーし（クリップボード履歴に残る）、清書結果をコピーし直して貼る
+  [ "$(head -n 1 "$T/clipboard-history")" = "$MOCK_GPU_TEXT " ]
+  [ "$(cat "$T/clipboard")" = '水曜日の会議です。' ]
   [ "$(line_of 'curl llm')" -gt "$(line_of 'wl-copy')" ]
   [ "$(cat "$state/transcript.txt")" = "$MOCK_GPU_TEXT" ]
   [ "$(cat "$state/transcript.cleaned.txt")" = "$MOCK_LLM_TEXT" ]
@@ -559,5 +599,5 @@ EOF
   [ -s "$XDG_STATE_HOME/voice-input/judgments.jsonl" ]
   [ "$(jq -r '.id' "$XDG_STATE_HOME/voice-input/history.jsonl")" = \
     "$(jq -r '.record_id' "$XDG_STATE_HOME/voice-input/judgments.jsonl")" ]
-  [ "$(line_of 'wtype')" -lt "$(line_of 'curl judge')" ]
+  [ "$(line_of 'hyprctl eval voice_input_paste()')" -lt "$(line_of 'curl judge')" ]
 }

@@ -174,24 +174,32 @@ if [ -f "$pid_file" ]; then
     fi
     cleanup_ms=$(( $(date +%s%3N) - cleanup_started_ms ))
   fi
-  # IME が有効だと wtype の入力が SKK に食われるので、入力中だけ切る
-  ime_state=$(fcitx5-remote 2>/dev/null || echo 0)
-  if [ "$ime_state" = 2 ]; then
-    fcitx5-remote -c
-    restore_ime=1
-    sleep 0.05
-  fi
-  printf '%s' "$transcript" | wtype -
-  if [ "$ime_state" = 2 ]; then
-    # wtype はキーを送り終えた時点で戻るが、アプリが受け取り終えるのはその後になる。
-    # 受け取り終えたかは外から分からないので、文が長いほど長めに待ってから IME を戻す
-    # （早く戻すと、残りの文字が SKK を通って崩れる）
-    chars=$(printf '%s' "$transcript" | wc -m)
-    wait_ms=$(( 50 + chars * ime_restore_ms_per_char ))
-    [ "$wait_ms" -le 3000 ] || wait_ms=3000
-    sleep "$((wait_ms / 1000)).$(printf '%03d' $((wait_ms % 1000)))"
-    fcitx5-remote -o
-    restore_ime=0
+  # Hyprland 設定が voice_input_paste を公開していれば、SUPER + V と同じ貼り付けで入力する。
+  # 貼り付けは IME を通らないので、長い文でも SKK で崩れない。
+  # 清書結果をクリップボードに入れ直すので、原文はクリップボード履歴に残る
+  if hyprctl eval 'assert(type(voice_input_paste) == "function")' >/dev/null 2>&1; then
+    [ "$transcript" = "$raw_transcript" ] || printf '%s' "$transcript" | wl-copy
+    hyprctl eval 'voice_input_paste()' >/dev/null
+  else
+    # IME が有効だと wtype の入力が SKK に食われるので、入力中だけ切る
+    ime_state=$(fcitx5-remote 2>/dev/null || echo 0)
+    if [ "$ime_state" = 2 ]; then
+      fcitx5-remote -c
+      restore_ime=1
+      sleep 0.05
+    fi
+    printf '%s' "$transcript" | wtype -
+    if [ "$ime_state" = 2 ]; then
+      # wtype はキーを送り終えた時点で戻るが、アプリが受け取り終えるのはその後になる。
+      # 受け取り終えたかは外から分からないので、文が長いほど長めに待ってから IME を戻す
+      # （早く戻すと、残りの文字が SKK を通って崩れる）
+      chars=$(printf '%s' "$transcript" | wc -m)
+      wait_ms=$(( 50 + chars * ime_restore_ms_per_char ))
+      [ "$wait_ms" -le 3000 ] || wait_ms=3000
+      sleep "$((wait_ms / 1000)).$(printf '%03d' $((wait_ms % 1000)))"
+      fcitx5-remote -o
+      restore_ime=0
+    fi
   fi
   if [ "$log_enabled" = 1 ] && command -v jq >/dev/null 2>&1; then
     total_ms=$(( $(date +%s%3N) - processing_started_ms ))

@@ -1,6 +1,6 @@
 # voice-input
 
-`SUPER + H` で音声入力を開始し、もう一度押すと止める。録音中は現在の出力音量を20%に下げ、停止キーで元に戻す。停止後に録音全体を GPU の Whisper サーバーで文字起こしし、原文をクリップボードへコピーしてから、ローカル LLM の清書結果を現在の入力先へ入力する。IME が有効な場合は、入力中だけオフにしてから元に戻す。
+`SUPER + H` で音声入力を開始し、もう一度押すと止める。録音中は現在の出力音量を20%に下げ、停止キーで元に戻す。停止後に録音全体を GPU の Whisper サーバーで文字起こしし、原文をクリップボードへコピーしてから、ローカル LLM の清書結果を `SUPER + V` と同じ方法で現在の入力先へ貼り付ける。
 
 動画「ローカル LLM で遊ぼう 第2弾」で解説している簡略版（Hyprland などに依存しない 1 ファイル版）は [`lite/`](lite/) にあります。
 
@@ -10,7 +10,7 @@
 2. 2回目の `SUPER + H` で録音を止め、出力音量をすぐに戻す。録音中には文字を入力しない。
 3. 録音全体を `127.0.0.1:8082/inference` に送り、日本語・タイムスタンプなしのテキストを取得する。GPU 処理が失敗するか空の結果を返した場合は、HUD に切替を表示して CPU の small モデルで同じ録音を再処理する。
 4. 10文字以上の認識結果はローカルの llama.cpp に送り、フィラーと言い直しの削除、句読点の調整を依頼する。15秒以内に清書できない場合や結果が空の場合は原文を使う。
-5. Whisper の原文をクリップボードへコピーし、清書結果を現在フォーカスしている入力先へ `wtype` で打ち込む。清書しなかった場合は両方とも原文になる。IME が有効なら打ち込み中だけ無効にする。
+5. Whisper の原文をクリップボードへコピーする。清書した場合は清書結果をコピーし直すので、原文は DMS のクリップボード履歴（`SUPER + CTRL + V`）に残る。次に `hyprctl eval 'voice_input_paste()'` で、`SUPER + V` と同じ貼り付けキー（端末は `Ctrl+Shift+V`、それ以外は `Ctrl+V`）を Hyprland から入力先へ送る。貼り付けは IME を通らないので、IME が有効でも長い文が崩れない。Hyprland 設定が `voice_input_paste` を公開していない環境では、従来どおり IME を一時的に無効にして `wtype` で打ち込む。
 6. 清書を適用した入力は、文字を返した後で別プロセスの評価モデルに渡す。評価待ちで文字入力を止めず、完了したら点数と判定段階を HUD に表示する。
 
 録音した WAV は次の録音開始時まで残る。Whisper の原文は `transcript.txt`、清書に成功した結果は `transcript.cleaned.txt` に残る。変換の失敗内容は同じディレクトリの `gpu.log`、`cpu.log` または `cleanup.log` に残る。
@@ -86,7 +86,7 @@ jq -r '[.timestamp, .whisper_model, .llm_model, .cleanup_status, .whisper_ms, .c
 - 録音に `pw-record`、文字起こしにローカルの `whisper-server` を使う。GPU 側は `${XDG_DATA_HOME:-$HOME/.local/share}/whisper/ggml-medium-q8_0.bin`（`ggml-medium.bin` を `q8_0` に量子化したもの）、CPU への切替時は `ggml-small.bin` を使う。サーバーと CPU 版 CLI はパッケージ版の `/usr/bin/whisper-server` と `/usr/bin/whisper-cli`。
 - 出力音量の変更と復元には `wpctl` を使う。録音開始時の出力先と音量を保存するため、途中で既定の出力先を変更しても元の出力先へ戻す。
 - 清書にローカルの `llama-server` と `jq` を使う。サーバーが停止していても原文入力に戻る。
-- Whisper 原文のコピーと清書結果の入力に `wl-copy`、`wtype`、`fcitx5-remote` を使う。
+- Whisper 原文のコピーと清書結果の入力に `wl-copy` と `hyprctl eval` を使う。貼り付けが使えない環境では `wtype` と `fcitx5-remote` を使う。
 
 ## CUDA 版 Whisper サーバー
 
@@ -146,12 +146,14 @@ cmake --build ~/src/whisper.cpp/build-cuda -j 4
 `SUPER + H` の割り当てと同じ Hyprland の設定ファイル（`~/.config/hypr/binds-omarchy.lua` または `~/.config/hypr/hyprland.lua`）に、次の submap を定義する。入力処理が予期せず止まって submap が残った場合は `F12` で通常のキー割り当てに戻せる。
 
 ```lua
+voice_input_paste = universal_paste
+
 hl.define_submap("voice_input_typing", function()
   hl.bind("F12", hl.dsp.submap("reset"), { description = "Exit voice input typing" })
 end)
 ```
 
-`voice-input` は録音停止後、この submap に切り替えてから変換・文字入力する。通常の `SUPER` ショートカットが文字入力中に発火するのを防ぎ、終了時はエラーが起きても元へ戻す。Hyprland の設定を変更したら `hyprctl reload` で反映する。
+`voice_input_paste` は `SUPER + V` の `universal_paste` をグローバルに公開したもので、`voice-input` が `hyprctl eval` から呼ぶ。`universal_paste` を定義した後に書く。`voice-input` は録音停止後、この submap に切り替えてから変換・文字入力する。通常の `SUPER` ショートカットが文字入力中に発火するのを防ぎ、終了時はエラーが起きても元へ戻す。Hyprland の設定を変更したら `hyprctl reload` で反映する。
 
 ## cli-hud との連携
 
@@ -198,7 +200,7 @@ make test
 - 録音開始時に出力音量を20%に下げ、停止時に戻す。ミュート中や既定の出力先がない場合も録音は始まる。
 - GPU が失敗するか空の結果を返したら、HUD に表示して CPU で再処理する。
 - 切替後の `whisper-cli` も VRAM 不足で失敗したら、HUD に表示して何も入力しない。
-- 文字入力は `voice_input_typing` submap の中で行い、失敗しても submap、IME、状態ファイルを元に戻す。
+- 入力は `voice_input_typing` submap の中で行う。`voice_input_paste` があれば貼り付け、なければ `wtype` で打ち込む。失敗しても submap、IME、状態ファイルを元に戻す。
 
 ## 変更の反映
 

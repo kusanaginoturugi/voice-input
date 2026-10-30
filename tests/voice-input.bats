@@ -432,6 +432,57 @@ EOF
   [ "$(cat "$T/typed")" = "$MOCK_GPU_TEXT " ]
 }
 
+@test "VOICE_INPUT_CLEANUP=2 ならフィラーだけ消した結果を入力する" {
+  export VOICE_INPUT_JUDGE_CMD="$JUDGE"
+  VOICE_INPUT_CLEANUP=2
+  MOCK_GPU_TEXT='えーと、あのー、それはいいと思うんだよね。'
+  MOCK_LLM_TEXT='それはいいと思うんだよね。'
+  start_fake_recording
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$T/typed")" = 'それはいいと思うんだよね。' ]
+  jq -r '.messages[0].content' "$T/llm-request.json" | grep -q 'フィラー'
+  jq -r '.messages[0].content' "$T/llm-request.json" | grep -q '1文字も変えない'
+  [ "$(jq -r '.cleanup_status' "$XDG_STATE_HOME/voice-input/history.jsonl")" = filler_removed ]
+  # 評価は清書（1）だけが対象
+  sleep 0.3
+  ! called 'curl judge' || false
+}
+
+@test "VOICE_INPUT_CLEANUP=2 で LLM が言い換えたら原文を入力する" {
+  VOICE_INPUT_CLEANUP=2
+  MOCK_GPU_TEXT='OCR2つっていうのは是非やりたいね。'
+  MOCK_LLM_TEXT='OCRを2つ試してみたいですね。'
+  start_fake_recording
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$T/typed")" = "$MOCK_GPU_TEXT " ]
+  [ "$(jq -r '.cleanup_status' "$XDG_STATE_HOME/voice-input/history.jsonl")" = rejected ]
+  [ "$(cat "$state/transcript.rejected.txt")" = "$MOCK_LLM_TEXT" ]
+  [ ! -f "$state/transcript.cleaned.txt" ]
+}
+
+@test "VOICE_INPUT_CLEANUP=2 で文の一部を長く落としたら原文を入力する" {
+  VOICE_INPUT_CLEANUP=2
+  MOCK_GPU_TEXT='そこプラス、あとそこまで行けば違うのは漢字の取り間違いだけです。'
+  MOCK_LLM_TEXT='そこ、違うのは漢字の取り間違いだけです。'
+  start_fake_recording
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$T/typed")" = "$MOCK_GPU_TEXT " ]
+  [ "$(jq -r '.cleanup_status' "$XDG_STATE_HOME/voice-input/history.jsonl")" = rejected ]
+}
+
+@test "VOICE_INPUT_CLEANUP=1 と 2 では LLM への指示が違う" {
+  VOICE_INPUT_CLEANUP=1
+  MOCK_GPU_TEXT='えーと、火曜日、いや、水曜日の会議です。'
+  MOCK_LLM_TEXT='水曜日の会議です。'
+  start_fake_recording
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  jq -r '.messages[0].content' "$T/llm-request.json" | grep -q '自然な日本語に清書'
+}
+
 @test "清書に失敗したら原文を入力する" {
   VOICE_INPUT_CLEANUP=1
   MOCK_GPU_TEXT='えーと、原文を使ってください。'

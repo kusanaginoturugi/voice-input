@@ -23,7 +23,7 @@ usage() {
 
 履歴の条件:
   --model 文字列    Whisper または清書モデル名に含まれる文字列
-  --status 状態     applied / failed / short / disabled / unavailable
+  --status 状態     applied / filler_removed / rejected / failed / short / disabled / unavailable
   --since 日付      YYYY-MM-DD 以降
   --text 文字列     原文または入力文に含まれる文字列
   --max-score 点数   指定点以下の評価済み履歴だけ表示（0〜100）

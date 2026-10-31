@@ -81,7 +81,7 @@ show_entry() {
   local filtered_file=$1 index=$2
   jq -r -s --argjson index "$index" '
     .[$index] |
-    "日時: \(.timestamp)\nWhisper: \(.whisper_model) (\(.whisper_ms) ms)\n清書: \(.llm_model) [\(.cleanup_status)] (\(.cleanup_ms) ms)\n全体: \(.total_ms) ms\n評価: \(if .judge == null then "未評価" elif .judge.status == "ok" then "\(.judge.score)点 / \(.judge.judge_model) (\(.judge.judge_ms) ms)\n判定: \(.judge.reason)" else "失敗 / \(.judge.judge_model)" end)\n\n原文:\n\(.raw_text)\n\n入力文:\n\(.output_text)"
+    "日時: \(.timestamp)\nWhisper: \(.whisper_model) (\(.whisper_ms) ms)\n清書: \(.llm_model) [\(.cleanup_status)] (\(.cleanup_ms) ms)\n全体: \(.total_ms) ms\n誤変換: \(if (.fix_status // "disabled") == "disabled" then "対象外" else "[\(.fix_status)] \(if (.fixes // []) == [] then "修正なし" else ((.fixes // []) | map("\(.wrong)→\(.right)") | join("、")) end)\(if (.rejected_fixes // []) == [] then "" else "（不採用: \((.rejected_fixes // []) | map("\(.wrong)→\(.right)") | join("、"))）" end)" end)\n評価: \(if .judge == null then "未評価" elif .judge.status == "ok" then "\(.judge.score)点 / \(.judge.judge_model) (\(.judge.judge_ms) ms)\n判定: \(.judge.reason)" else "失敗 / \(.judge.judge_model)" end)\n\n原文:\n\(.raw_text)\n\n入力文:\n\(.output_text)"
   ' "$filtered_file"
 }
 

@@ -34,6 +34,8 @@ setup() {
   export VOICE_INPUT_CLEANUP=0
   export VOICE_INPUT_LOG=1
   export MOCK_LLM=ok
+  export MOCK_FIX=ok
+  export MOCK_FIXES='[]'
   export MOCK_LLM_TEXT='清書した結果'
   export MOCK_JUDGE=ok
   export MOCK_JUDGE_SCORE=1.68
@@ -83,6 +85,16 @@ if [ "$is_judge" = 1 ]; then
   case "$MOCK_JUDGE" in
     ok) jq -n --argjson score "$MOCK_JUDGE_SCORE" '{answers:{quality:{score:$score,confidence:0.4,probabilities:(if $score >= 3 then {"0":0.01,"1":0.04,"2":0.15,"3":0.6,"4":0.2} else {"0":0.08,"1":0.38,"2":0.37,"3":0.12,"4":0.05} end)}}}' > "$out" ;;
     invalid) printf '%s\n' '{"answers":{"quality":{"score":"bad"}}}' > "$out" ;;
+    fail) exit 7 ;;
+  esac
+  exit 0
+fi
+if [ "$is_llm" = 1 ] && printf '%s' "$payload" | jq -e '.messages[0].content | contains("誤変換")' >/dev/null; then
+  echo 'curl llm-fix' >> "$T/calls"
+  printf '%s' "$payload" > "$T/llm-fix-request.json"
+  case "$MOCK_FIX" in
+    ok) jq -n --argjson fixes "$MOCK_FIXES" '{choices: [{message: {content: ({fixes: $fixes} | tojson)}}]}' > "$out" ;;
+    invalid) printf '%s\n' '{"choices":[{"message":{"content":"{\"誤変換\":[]}"}}]}' > "$out" ;;
     fail) exit 7 ;;
   esac
   exit 0
@@ -481,6 +493,84 @@ EOF
   run "$SCRIPT"
   [ "$status" -eq 0 ]
   jq -r '.messages[0].content' "$T/llm-request.json" | grep -q '自然な日本語に清書'
+}
+
+@test "VOICE_INPUT_CLEANUP=3 ならフィラーを消してから、読みが同じ誤変換だけを直す" {
+  VOICE_INPUT_CLEANUP=3
+  MOCK_GPU_TEXT='えーと、次は木字を作ってから多数結で決めます。'
+  MOCK_LLM_TEXT='次は木字を作ってから多数結で決めます。'
+  MOCK_FIXES='[{"wrong":"木字","right":"目次"},{"wrong":"多数結","right":"多数決"}]'
+  start_fake_recording
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$T/typed")" = '次は目次を作ってから多数決で決めます。' ]
+  [ "$(cat "$state/transcript.cleaned.txt")" = '次は目次を作ってから多数決で決めます。' ]
+  # 誤変換はフィラーを消した後の文から探す
+  [ "$(jq -r '.messages[1].content' "$T/llm-fix-request.json")" = "$MOCK_LLM_TEXT" ]
+  [ "$(line_of 'curl llm')" -lt "$(line_of 'curl llm-fix')" ]
+  jq -e '.cleanup_status == "filler_removed" and .fix_status == "applied" and
+    .fixes == [{"wrong":"木字","right":"目次"},{"wrong":"多数結","right":"多数決"}] and
+    .rejected_fixes == []' "$XDG_STATE_HOME/voice-input/history.jsonl"
+}
+
+@test "VOICE_INPUT_CLEANUP=3 では原文にない語や、文字数・読みが違う修正を当てはめない" {
+  VOICE_INPUT_CLEANUP=3
+  MOCK_GPU_TEXT='次は木字を作ってから本文を書きます。'
+  MOCK_LLM_TEXT=$MOCK_GPU_TEXT
+  MOCK_FIXES='[{"wrong":"木字","right":"目次の"},{"wrong":"存在しない","right":"存在する"},{"wrong":"本文","right":"論文"}]'
+  start_fake_recording
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$T/typed")" = "$MOCK_GPU_TEXT" ]
+  jq -e '.fix_status == "none" and .fixes == [] and (.rejected_fixes | length) == 3' \
+    "$XDG_STATE_HOME/voice-input/history.jsonl"
+}
+
+@test "VOICE_INPUT_CLEANUP=3 で誤変換の応答が壊れていたら、フィラーを消した文を入力する" {
+  VOICE_INPUT_CLEANUP=3
+  MOCK_GPU_TEXT='えーと、次は木字を作ります。'
+  MOCK_LLM_TEXT='次は木字を作ります。'
+  MOCK_FIX=invalid
+  start_fake_recording
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$T/typed")" = '次は木字を作ります。' ]
+  [ "$(jq -r '.fix_status' "$XDG_STATE_HOME/voice-input/history.jsonl")" = failed ]
+}
+
+@test "VOICE_INPUT_CLEANUP=3 でフィラー削除の LLM に繋がらなければ、誤変換の修正も呼ばない" {
+  VOICE_INPUT_CLEANUP=3
+  MOCK_GPU_TEXT='次は木字を作ってから本文を書きます。'
+  MOCK_LLM=fail
+  start_fake_recording
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$T/typed")" = "$MOCK_GPU_TEXT " ]
+  ! called 'curl llm-fix' || false
+}
+
+@test "VOICE_INPUT_CLEANUP=3 で誤変換の LLM に繋がらなくても、フィラーを消した文を入力する" {
+  VOICE_INPUT_CLEANUP=3
+  MOCK_GPU_TEXT='えーと、次は木字を作ります。'
+  MOCK_LLM_TEXT='次は木字を作ります。'
+  MOCK_FIX=fail
+  start_fake_recording
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$T/typed")" = '次は木字を作ります。' ]
+  [ "$(jq -r '.fix_status' "$XDG_STATE_HOME/voice-input/history.jsonl")" = failed ]
+}
+
+@test "VOICE_INPUT_CLEANUP=2 では誤変換を直さない" {
+  VOICE_INPUT_CLEANUP=2
+  MOCK_GPU_TEXT='次は木字を作ってから本文を書きます。'
+  MOCK_LLM_TEXT=$MOCK_GPU_TEXT
+  MOCK_FIXES='[{"wrong":"木字","right":"目次"}]'
+  start_fake_recording
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  ! called 'curl llm-fix' || false
+  [ "$(jq -r '.fix_status' "$XDG_STATE_HOME/voice-input/history.jsonl")" = disabled ]
 }
 
 @test "清書に失敗したら原文を入力する" {

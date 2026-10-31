@@ -24,8 +24,9 @@
 | `0`（既定） | 清書しない。Whisper の原文を入力する。 |
 | `1` | 清書する。フィラーと言い直しを削除し、句読点を整える。文体や言い回しも変わることがある。 |
 | `2` | フィラー（えー、えっと、あのー、うーん など）とその直後の読点だけを消す。LLM の結果が原文から文字を消しただけで作れない場合（置き換え・追加がある場合や、1か所で9文字以上消した場合）は、原文を入力する。 |
+| `3` | `2` の後に、読みが同じで漢字が違う誤変換（木字→目次、多数結→多数決 など）を直す。LLM には直した文ではなく「誤っている語と正しい語」の組だけを返させ、原文にあり、文字数が同じで、`kakasi` で調べた読みが一致する組だけを当てはめる。それ以外の文字は変わらない。 |
 
-Hyprland のキー割り当てから起動する場合は、その割り当てのコマンドにも同じ環境変数を付ける。短い発話は設定に関係なく清書しない。`2` で弾いた LLM の結果は `transcript.rejected.txt` に残り、履歴の `cleanup_status` は `rejected` になる。フィラーを消せた場合は `filler_removed`。評価（Laya）は `1` の清書だけが対象。
+Hyprland のキー割り当てから起動する場合は、その割り当てのコマンドにも同じ環境変数を付ける。短い発話は設定に関係なく清書しない。`2` で弾いた LLM の結果は `transcript.rejected.txt` に残り、履歴の `cleanup_status` は `rejected` になる。フィラーを消せた場合は `filler_removed`。`3` の誤変換修正は履歴の `fix_status`（`applied` / `none` / `failed` / `unavailable` / `disabled`）、当てはめた組を `fixes`、条件を満たさず捨てた組を `rejected_fixes` に記録し、`voice-inputctl logs` の詳細にも表示する。読みの検査は言い換えを防ぐもので、同じ読みの別の語（漢字→感じ など）への誤った修正までは防げない。`kakasi` がなければ誤変換の修正だけを飛ばす。評価（Laya）は `1` の清書だけが対象。
 
 既定では `127.0.0.1:8080/v1/chat/completions` の `gemma-4-E4B-it-qat` を使う。`voice-inputctl model` でサーバー上のモデルを選ぶと、次の音声入力から切り替わる。設定は `${XDG_CONFIG_HOME:-$HOME/.config}/voice-input/model` に保存する。`VOICE_INPUT_LLM_MODEL` が指定されていればそちらを優先する。接続先を変える場合は `VOICE_INPUT_LLM_URL` を指定し、一覧の接続先は `VOICE_INPUT_LLM_BASE_URL` で変える。モデルの読み込み時間も含めて15秒で打ち切り、Whisper の原文を入力する。清書は意味の取り違えがあり得るため、固有名詞・数字・指示文は使用前に確認する。
 
@@ -89,7 +90,7 @@ jq -r '[.timestamp, .whisper_model, .llm_model, .cleanup_status, .whisper_ms, .c
 
 ## 実行環境
 
-- Hyprland の設定で `SUPER + H` に `env VOICE_INPUT_CLEANUP=2 voice-input`（フィラーだけ消すモード）を割り当てる。設定ファイルはマシンによって違い、`~/.config/hypr/binds-omarchy.lua` または `~/.config/hypr/hyprland.lua` に置いている。
+- Hyprland の設定で `SUPER + H` に `env VOICE_INPUT_CLEANUP=3 voice-input`（フィラーを消して誤変換を直すモード）を割り当てる。設定ファイルはマシンによって違い、`~/.config/hypr/binds-omarchy.lua` または `~/.config/hypr/hyprland.lua` に置いている。
 - 実際に呼ばれるファイルは `~/.local/bin/voice-input`。このディレクトリの `voice-input` が編集用の原本。
 - 録音に `pw-record`、文字起こしにローカルの `whisper-server` を使う。GPU 側は `${XDG_DATA_HOME:-$HOME/.local/share}/whisper/ggml-medium-q8_0.bin`（`ggml-medium.bin` を `q8_0` に量子化したもの）、CPU への切替時は `ggml-small.bin` を使う。サーバーと CPU 版 CLI はパッケージ版の `/usr/bin/whisper-server` と `/usr/bin/whisper-cli`。
 - 出力音量の変更と復元には `wpctl` を使う。録音開始時の出力先と音量を保存するため、途中で既定の出力先を変更しても元の出力先へ戻す。
@@ -197,7 +198,7 @@ wf-recorder -c h264_nvenc -g "$(slurp)" \
 `shellcheck` と `bats` を使う。
 
 ```sh
-sudo pacman -S --needed shellcheck bats
+sudo pacman -S --needed shellcheck bats kakasi
 make test
 ```
 

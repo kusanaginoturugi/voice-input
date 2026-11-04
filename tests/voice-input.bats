@@ -148,16 +148,35 @@ printf '%s\n' "$MOCK_CPU_TEXT" > "$base.txt"
 EOF
   mock qs <<'EOF'
 echo "qs $*" >> "$T/calls"
-cp "$VOICE_INPUT_DIALOG_IN" "$T/dialog-shown"
+printf '%s\n' "$VOICE_INPUT_SELF" > "$T/dialog-self"
+[ "$MOCK_DIALOG" != fail ] || { echo 'failed to connect to wayland' >&2; exit 1; }
+# 本物と同じく状態ファイルを見張る。録音中に開かれたら、editing か closed になるまで待つ
+phase=
+for _ in $(seq 100); do
+  phase=$(jq -r '.phase' "$VOICE_INPUT_DIALOG_STATE" 2>/dev/null) || phase=
+  printf '%s\n' "$phase" >> "$T/dialog-phases"
+  if [ "$phase" = recording ] && [ "$MOCK_DIALOG" = cancel_recording ]; then
+    echo cancel > "$VOICE_INPUT_DIALOG_CANCEL"
+    exit 0
+  fi
+  case "$phase" in
+    editing|closed) break ;;
+  esac
+  sleep 0.05
+done
+if [ "$phase" = closed ]; then
+  echo cancel > "$VOICE_INPUT_DIALOG_CANCEL"
+  exit 0
+fi
+jq -r '.text' "$VOICE_INPUT_DIALOG_STATE" > "$T/dialog-shown"
 case "$MOCK_DIALOG" in
   submit)
     if [ -n "${MOCK_DIALOG_TEXT+set}" ]; then
       printf '%s' "$MOCK_DIALOG_TEXT" > "$VOICE_INPUT_DIALOG_OUT"
     else
-      printf '%s' "$(cat "$VOICE_INPUT_DIALOG_IN")" > "$VOICE_INPUT_DIALOG_OUT"
+      printf '%s' "$(cat "$T/dialog-shown")" > "$VOICE_INPUT_DIALOG_OUT"
     fi ;;
-  cancel) : > "$VOICE_INPUT_DIALOG_CANCEL" ;;
-  fail) echo 'failed to connect to wayland' >&2; exit 1 ;;
+  cancel) echo cancel > "$VOICE_INPUT_DIALOG_CANCEL" ;;
   killed) exit 143 ;;
   hang) exec sleep 30 ;;
 esac
@@ -191,6 +210,9 @@ EOF
 }
 
 teardown() {
+  if [ -f "$state/dialog.pid" ]; then
+    kill "$(cat "$state/dialog.pid")" 2>/dev/null || true
+  fi
   if [ -f "$state/recording.pid" ]; then
     kill "$(cat "$state/recording.pid")" 2>/dev/null || true
   fi
@@ -216,6 +238,14 @@ start_fake_recording() {
   echo '42 0.80' > "$state/sink-volume"
   : > "$state/input.wav"
   echo 0xabc > "$state/target-window"
+}
+
+wait_for() {
+  for _ in $(seq 100); do
+    [ -e "$1" ] && return 0
+    sleep 0.05
+  done
+  return 1
 }
 
 called() {
@@ -416,6 +446,75 @@ EOF
   run "$SCRIPT"
   [ "$status" -eq 0 ]
   [ "$(cat "$state/target-window")" = 0x1234 ]
+}
+
+@test "録音を始めたら、録音中の表示でダイアログを開く" {
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ -f "$state/dialog.pid" ]
+  [ "$(jq -r '.phase' "$state/dialog-state.json")" = recording ]
+  wait_for "$T/dialog-phases"
+  [ "$(head -n 1 "$T/dialog-phases")" = recording ]
+  # ダイアログの Ctrl+Enter で止めるときに起動し直すのは、このスクリプト自身
+  [ "$(cat "$T/dialog-self")" = "$SCRIPT" ]
+}
+
+@test "録音中に開いたダイアログで、文字起こし中から編集に切り替えて貼る" {
+  MOCK_DIALOG_TEXT='直した文'
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$T/typed")" = '直した文' ]
+  [ "$(cat "$T/dialog-shown")" = 'GPUの結果 ' ]
+  # 止めたときに新しくダイアログを開かない
+  [ "$(grep -c '^qs ' "$T/calls")" -eq 1 ]
+  grep -qx editing "$T/dialog-phases"
+  jq -e '.dialog_status == "submitted" and .output_text == "直した文"' "$XDG_STATE_HOME/voice-input/history.jsonl"
+}
+
+@test "録音中にダイアログを Esc でやめたら、録音を捨てて音量を戻す" {
+  MOCK_DIALOG=cancel_recording
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  recorder=$(cat "$state/recording.pid" 2>/dev/null || true)
+  wait_for "$state/dialog-rc"
+  [ ! -f "$state/recording.pid" ]
+  called 'wpctl set-volume 42 0.80'
+  if [ -n "$recorder" ]; then
+    for _ in $(seq 20); do kill -0 "$recorder" 2>/dev/null || break; sleep 0.05; done
+    ! kill -0 "$recorder" 2>/dev/null || false
+  fi
+  # 次の SUPER + H は新しい録音になる
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ -f "$state/recording.pid" ]
+  [ ! -f "$T/typed" ]
+}
+
+@test "録音中に開いたダイアログは、文字起こしに失敗したら閉じさせる" {
+  MOCK_CURL=fail
+  rm "$XDG_DATA_HOME/whisper/ggml-small.bin"
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  run "$SCRIPT"
+  [ "$status" -eq 1 ]
+  [ "$(jq -r '.phase' "$state/dialog-state.json")" = closed ]
+  wait_for "$state/dialog-rc"
+  [ -f "$state/dialog-cancel" ]
+  [ ! -f "$T/typed" ]
+}
+
+@test "録音開始時にダイアログが起動できなければ、止めた後にそのまま貼る" {
+  MOCK_DIALOG=fail
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  wait_for "$state/dialog-rc"
+  [ -f "$state/recording.pid" ]
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$T/typed")" = 'GPUの結果 ' ]
+  [ "$(jq -r '.dialog_status' "$XDG_STATE_HOME/voice-input/history.jsonl")" = unavailable ]
 }
 
 @test "認識結果を確認ダイアログに出し、送信した文を貼る" {

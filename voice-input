@@ -37,6 +37,15 @@ dictionary_file="${XDG_CONFIG_HOME:-$HOME/.config}/voice-input/dictionary.tsv"
 candidates_file="$log_dir/dictionary-candidates.jsonl"
 promote_count="${VOICE_INPUT_DICT_PROMOTE:-2}"
 dialog_timeout="${VOICE_INPUT_DIALOG_TIMEOUT:-1800}"
+dialog_state="$state_dir/dialog-state.json"
+dialog_rc_file="$state_dir/dialog-rc"
+dialog_pid_file="$state_dir/dialog.pid"
+# ダイアログの Ctrl+Enter で録音を止めるときに、ダイアログから起動し直すパス
+self=$(command -v -- "$0" 2>/dev/null) || self=$0
+case "$self" in
+  /*) ;;
+  *) self="$PWD/$self" ;;
+esac
 
 restore_volume() {
   if [ -f "$volume_file" ]; then
@@ -219,29 +228,76 @@ $pairs
 EOF
 }
 
-# 確認ダイアログで直してもらう。送信なら edited に入れて 0、やめたら 1、ダイアログを使えなければ 2。
-# 30分で閉じる。時間切れや F12 で閉じられたときも、やめたものとして何も貼らない
-edit_in_dialog() {
-  if [ "$dialog_enabled" != 1 ] || [ ! -r "$dialog_qml" ] || ! command -v qs >/dev/null 2>&1; then
-    return 2
-  fi
+dialog_available() {
+  [ "$dialog_enabled" = 1 ] && [ -r "$dialog_qml" ] && command -v qs >/dev/null 2>&1
+}
+
+# ダイアログに表示させる状態を書く。途中まで書いたファイルを読ませないように置き換える
+write_dialog_state() {
+  jq -nc --arg phase "$1" --arg text "${2-}" '{phase: $phase, text: $text}' > "$dialog_state.tmp" &&
+    mv -f -- "$dialog_state.tmp" "$dialog_state"
+}
+
+# 30分で閉じる
+run_dialog() {
   rm -f "$state_dir/dialog-out.txt" "$state_dir/dialog-cancel"
-  printf '%s\n' "$1" > "$state_dir/dialog-in.txt"
-  dialog_rc=0
-  VOICE_INPUT_DIALOG_IN="$state_dir/dialog-in.txt" \
+  VOICE_INPUT_DIALOG_STATE="$dialog_state" \
     VOICE_INPUT_DIALOG_OUT="$state_dir/dialog-out.txt" \
     VOICE_INPUT_DIALOG_CANCEL="$state_dir/dialog-cancel" \
-    timeout "$dialog_timeout" qs -p "$dialog_qml" >"$state_dir/dialog.log" 2>&1 || dialog_rc=$?
+    VOICE_INPUT_SELF="$self" \
+    timeout "$dialog_timeout" qs -p "$dialog_qml" >"$state_dir/dialog.log" 2>&1
+}
+
+# 閉じたダイアログの結果。送信なら edited に入れて 0、やめたら 1、ダイアログを使えなかったら 2。
+# 時間切れ（124）や F12 で終了させられた（143）ときも、やめたものとして何も貼らない
+dialog_outcome() {
   if [ -f "$state_dir/dialog-out.txt" ]; then
     edited=$(cat "$state_dir/dialog-out.txt")
     return 0
   fi
   [ ! -f "$state_dir/dialog-cancel" ] || return 1
-  # 124: 時間切れ、143: F12 などで終了させられた
   case "$dialog_rc" in
     124|143) return 1 ;;
   esac
   return 2
+}
+
+# 録音を始めるときにダイアログを開き、開いたままにする。閉じたら終了コードを dialog-rc に書く。
+# 録音中にやめた（Esc・時間切れ・F12）なら、録音を捨てて音量を戻す
+open_dialog() {
+  write_dialog_state recording
+  (
+    rc=0
+    run_dialog || rc=$?
+    if [ -f "$pid_file" ] && { [ -f "$state_dir/dialog-cancel" ] || [ "$rc" = 124 ] || [ "$rc" = 143 ]; }; then
+      kill "$(cat "$pid_file")" 2>/dev/null || true
+      rm -f "$pid_file"
+      restore_volume
+    fi
+    printf '%s\n' "$rc" > "$dialog_rc_file"
+  ) </dev/null >/dev/null 2>&1 &
+  printf '%s\n' "$!" > "$dialog_pid_file"
+}
+
+# 録音開始時に開いたダイアログが閉じるのを待つ
+wait_dialog() {
+  watcher=$(cat "$dialog_pid_file" 2>/dev/null) || watcher=
+  while [ ! -f "$dialog_rc_file" ]; do
+    # 見張りが結果を書かずに消えていたら、ダイアログは使えなかったものとする
+    { [ -n "$watcher" ] && kill -0 "$watcher" 2>/dev/null; } || break
+    sleep 0.05
+  done
+  dialog_rc=$(cat "$dialog_rc_file" 2>/dev/null) || dialog_rc=0
+  dialog_outcome
+}
+
+# 録音開始時にダイアログを開いていなかったとき（使えなかった、古い版で録音を始めた）は、ここで開く
+edit_in_dialog() {
+  dialog_available || return 2
+  write_dialog_state editing "$1"
+  dialog_rc=0
+  run_dialog || dialog_rc=$?
+  dialog_outcome
 }
 
 # 録音を始めたときに前面にあったウィンドウへフォーカスを戻す。そのウィンドウが閉じられていたら 1
@@ -279,6 +335,13 @@ if [ -f "$pid_file" ]; then
   done
 
   printf '%s transcribing\n' "$$" > "$hud_status"
+  # 録音開始時に開いたダイアログがあれば、文字起こし中の表示にする
+  dialog_session=0
+  if [ -f "$dialog_pid_file" ] && [ -f "$dialog_state" ] && [ ! -f "$dialog_rc_file" ]; then
+    dialog_session=1
+    write_dialog_state transcribing || true
+  fi
+  dialog_done=0
   typing_submap=0
   restore_ime=0
   # shellcheck disable=SC2317,SC2329 # trap から呼ぶ
@@ -291,6 +354,10 @@ if [ -f "$pid_file" ]; then
     fi
     rm -f "$hud_status"
     "$hud_status_cmd" clear voice-input >/dev/null 2>&1 || true
+    # 途中で失敗したら、開いたままのダイアログを閉じさせる
+    if [ "$dialog_session" = 1 ] && [ "$dialog_done" = 0 ]; then
+      write_dialog_state closed >/dev/null 2>&1 || true
+    fi
   }
   trap cleanup 0
   trap 'exit 1' 1 2 15
@@ -395,7 +462,13 @@ if [ -f "$pid_file" ]; then
   "$hud_status_cmd" clear voice-input >/dev/null 2>&1 || true
   dialog_started_ms=$(date +%s%3N)
   dialog_result=0
-  edit_in_dialog "$transcript" || dialog_result=$?
+  if [ "$dialog_session" = 1 ]; then
+    write_dialog_state editing "$transcript"
+    wait_dialog || dialog_result=$?
+  else
+    edit_in_dialog "$transcript" || dialog_result=$?
+  fi
+  dialog_done=1
   case "$dialog_result" in
     0)
       dialog_status=submitted
@@ -482,3 +555,7 @@ rm -f "$audio" "$text_base.txt"
 hyprctl activewindow -j 2>/dev/null | jq -r '.address // empty' > "$target_file" 2>/dev/null || rm -f "$target_file"
 pw-record --rate 16000 --channels 1 "$audio" >/dev/null 2>&1 &
 printf '%s\n' "$!" > "$pid_file"
+rm -f "$dialog_state" "$dialog_pid_file" "$dialog_rc_file"
+if dialog_available; then
+  open_dialog
+fi

@@ -1,8 +1,12 @@
-// voice-input の確認ダイアログ。認識結果を直してから貼り付けるために使う。
-// Enter は改行、Ctrl+Enter で送信、Esc で何も貼らずにやめる。Emacs の基本的なキーバインドで編集できる。
-// VOICE_INPUT_DIALOG_IN の文を表示し、送信したら VOICE_INPUT_DIALOG_OUT に書いて終わる。
-// やめたとき（全部消して送信したときも）は VOICE_INPUT_DIALOG_CANCEL を作って終わる。
-// どちらもなければ、起動か保存に失敗している。
+// voice-input の確認ダイアログ。録音を始めたときに開き、認識結果を直してから貼り付けるために使う。
+// VOICE_INPUT_DIALOG_STATE（{"phase": ..., "text": ...}）を見張って表示を切り替える。
+//   recording: 録音中。Ctrl+Enter で VOICE_INPUT_SELF（voice-input）を起動して録音を止める
+//   transcribing: 文字起こし中
+//   editing: text を編集する。Enter は改行、Ctrl+Enter で送信。Emacs の基本的なキーバインドが使える
+//   closed: voice-input が失敗したので、やめたものとして閉じる
+// Esc はいつでも何も貼らずにやめる。
+// 送信したら VOICE_INPUT_DIALOG_OUT に書いて終わる。やめたとき（全部消して送信したときも）は
+// VOICE_INPUT_DIALOG_CANCEL を作って終わる。どちらもなければ、起動か保存に失敗している。
 import QtQuick
 import QtQuick.Controls
 import Quickshell
@@ -13,7 +17,8 @@ import Quickshell.Wayland
 ShellRoot {
     id: root
 
-    readonly property string inPath: Quickshell.env("VOICE_INPUT_DIALOG_IN") || ""
+    readonly property string statePath: Quickshell.env("VOICE_INPUT_DIALOG_STATE") || ""
+    readonly property string selfPath: Quickshell.env("VOICE_INPUT_SELF") || "voice-input"
     readonly property string outPath: Quickshell.env("VOICE_INPUT_DIALOG_OUT") || ""
     readonly property string cancelPath: Quickshell.env("VOICE_INPUT_DIALOG_CANCEL") || ""
 
@@ -82,10 +87,37 @@ ShellRoot {
         printErrors: false
     }
 
+    property string phase: "recording"
+    // Ctrl+Enter で録音を止めに行った後。二度押しで録音をもう一度始めないようにする
+    property bool stopping: false
+    property int recordingSeconds: 0
+
     FileView {
-        id: input
-        path: root.inPath
+        id: stateFile
+        path: root.statePath
         blockLoading: true
+        watchChanges: true
+        onFileChanged: reload()
+        onLoaded: root.applyState(root.parseJson(text()))
+    }
+
+    function applyState(state) {
+        if (!state || state.phase === phase)
+            return
+        phase = state.phase
+        if (phase === "editing") {
+            editor.text = (state.text || "").replace(/\n$/, "")
+            editor.cursorPosition = editor.length
+        } else if (phase === "closed") {
+            finish("")
+        }
+    }
+
+    Timer {
+        interval: 1000
+        repeat: true
+        running: root.phase === "recording"
+        onTriggered: root.recordingSeconds++
     }
 
     FileView {
@@ -145,8 +177,17 @@ ShellRoot {
                 spacing: 10
 
                 Text {
-                    text: "音声入力: 直してから Ctrl+Enter で貼り付け（Enter は改行、Esc でやめる）"
-                    color: root.muted
+                    text: {
+                        if (root.phase === "recording") {
+                            const time = Math.floor(root.recordingSeconds / 60) + ":" + String(root.recordingSeconds % 60).padStart(2, "0")
+                            return root.stopping ? "音声入力: 録音を止めています…"
+                                : "● 音声入力: 録音中 " + time + "（SUPER + H か Ctrl+Enter で止める、Esc でやめる）"
+                        }
+                        if (root.phase === "transcribing")
+                            return "音声入力: 文字起こし中…（Esc でやめる）"
+                        return "音声入力: 直してから Ctrl+Enter で貼り付け（Enter は改行、Esc でやめる）"
+                    }
+                    color: root.phase === "recording" && !root.stopping ? root.accent : root.muted
                     font.pixelSize: 13
                 }
 
@@ -163,7 +204,9 @@ ShellRoot {
                         property real goalX: -1
                         property string killBuffer: ""
 
-                        text: input.text().replace(/\n$/, "")
+                        readOnly: root.phase !== "editing"
+                        placeholderText: root.phase === "recording" ? "話してください" : ""
+                        placeholderTextColor: root.muted
                         wrapMode: TextEdit.Wrap
                         color: root.foreground
                         selectionColor: Qt.alpha(root.accent, 0.35)
@@ -315,12 +358,22 @@ ShellRoot {
                                 return
                             if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
                                     && (event.modifiers & Qt.ControlModifier)) {
-                                root.finish(text)
+                                if (root.phase === "editing") {
+                                    root.finish(text)
+                                } else if (root.phase === "recording" && !root.stopping) {
+                                    root.stopping = true
+                                    // ダイアログが閉じても止まらないように切り離して起動する
+                                    Quickshell.execDetached([root.selfPath])
+                                }
                                 event.accepted = true
                                 return
                             }
                             if (event.key === Qt.Key_Escape) {
                                 root.finish("")
+                                event.accepted = true
+                                return
+                            }
+                            if (root.phase !== "editing") {
                                 event.accepted = true
                                 return
                             }

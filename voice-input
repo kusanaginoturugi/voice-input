@@ -399,6 +399,8 @@ if [ -f "$pid_file" ]; then
     *) [ "$dialog_enabled" != 1 ] || dialog_status=unavailable ;;
   esac
   [ "$dialog_status" = disabled ] || dialog_ms=$(( $(date +%s%3N) - dialog_started_ms ))
+  # ダイアログが消えて、キーボードが元のウィンドウに戻るのを待つ
+  [ "$dialog_status" != submitted ] || sleep 0.1
   if [ "$dialog_status" = cancelled ]; then
     transcript=
   elif [ "$dialog_status" = submitted ] && ! focus_target; then

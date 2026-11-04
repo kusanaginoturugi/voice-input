@@ -5,6 +5,7 @@
 import QtQuick
 import QtQuick.Controls
 import Quickshell
+import Quickshell.Hyprland
 import Quickshell.Io
 import Quickshell.Wayland
 
@@ -40,6 +41,7 @@ ShellRoot {
     PanelWindow {
         id: window
 
+        screen: Quickshell.screens.find(s => s.name === Hyprland.focusedMonitor?.name) ?? Quickshell.screens[0]
         WlrLayershell.layer: WlrLayer.Overlay
         WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
         WlrLayershell.namespace: "voice-input-dialog"
@@ -225,6 +227,9 @@ ShellRoot {
                         }
 
                         Keys.onPressed: event => {
+                            // SKK の変換中はキーを横取りしない（Esc で変換をやめたつもりが、ダイアログごと閉じないように）
+                            if (preeditText !== "")
+                                return
                             if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
                                     && (event.modifiers & Qt.ControlModifier)) {
                                 output.setText(text)
@@ -236,9 +241,6 @@ ShellRoot {
                                 event.accepted = true
                                 return
                             }
-                            // SKK の変換中はキーを横取りしない
-                            if (preeditText !== "")
-                                return
                             const handled = emacsKey(event)
                             if (handled !== "keepGoal")
                                 goalX = -1

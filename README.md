@@ -19,7 +19,7 @@
 
 ## 確認ダイアログ
 
-認識結果は `quickshell` のダイアログ（`voice-input-dialog.qml`、`deploy` で `${XDG_DATA_HOME:-$HOME/.local/share}/voice-input/` に入る）に出す。レイヤーシェルの面として画面中央に浮かび、キーボードを占有する。SKK で日本語を入力できる。
+認識結果は `quickshell` のダイアログ（`voice-input-dialog.qml`、`deploy` で `${XDG_DATA_HOME:-$HOME/.local/share}/voice-input/` に入る）に出す。レイヤーシェルの面として画面中央に浮かび、キーボードを占有する。色は cli-hud と同じく DMS のテーマ（カスタムテーマ・ダイナミックカラー、ライト/ダーク）に合わせ、読めなければ既定の色にする。SKK で日本語を入力できる。
 
 | キー | 動作 |
 | --- | --- |

@@ -16,6 +16,71 @@ ShellRoot {
     readonly property string outPath: Quickshell.env("VOICE_INPUT_DIALOG_OUT") || ""
     readonly property string cancelPath: Quickshell.env("VOICE_INPUT_DIALOG_CANCEL") || ""
 
+    // DMS のテーマに合わせる（cli-hud と同じ読み方）。読めない値は既定の色にする。
+    // 開いている時間が短いので、表示前に読み込みを済ませて色のちらつきを防ぐ
+    readonly property string home: Quickshell.env("HOME")
+    readonly property var dmsSettings: parseJson(settingsFile.text()) || ({})
+    readonly property bool dmsLight: parseJson(sessionFile.text())?.isLightMode === true
+    readonly property string dmsThemeFile: {
+        const file = dmsSettings.currentThemeName === "custom" ? (dmsSettings.customThemeFile || "") : ""
+        return file.startsWith("~") ? home + file.slice(1) : file
+    }
+    readonly property var themeColors: {
+        const mode = dmsLight ? "light" : "dark"
+        const custom = dmsThemeFile ? parseJson(customThemeFile.text()) : null
+        if (custom)
+            return custom[mode] || custom.dark || custom
+        const dynamic = dmsSettings.currentThemeName === "dynamic" ? parseJson(dynamicColorsFile.text())?.colors?.[mode] : null
+        if (!dynamic)
+            return ({})
+        return {
+            surfaceContainer: dynamic.surface_container,
+            surfaceText: dynamic.on_surface,
+            surfaceVariantText: dynamic.on_surface_variant,
+            primary: dynamic.primary
+        }
+    }
+    readonly property color background: Qt.alpha(themeColors.surfaceContainer || "#1e1e2e", 0.97)
+    readonly property color foreground: themeColors.surfaceText || "#cdd6f4"
+    readonly property color muted: themeColors.surfaceVariantText || "#bac2de"
+    readonly property color accent: themeColors.primary || "#89b4fa"
+
+    function parseJson(text) {
+        try {
+            return JSON.parse(text)
+        } catch (e) {
+            return null
+        }
+    }
+
+    FileView {
+        id: settingsFile
+        path: root.home + "/.config/DankMaterialShell/settings.json"
+        blockLoading: true
+        printErrors: false
+    }
+
+    FileView {
+        id: sessionFile
+        path: root.home + "/.local/state/DankMaterialShell/session.json"
+        blockLoading: true
+        printErrors: false
+    }
+
+    FileView {
+        id: customThemeFile
+        path: root.dmsThemeFile
+        blockLoading: true
+        printErrors: false
+    }
+
+    FileView {
+        id: dynamicColorsFile
+        path: root.home + "/.cache/DankMaterialShell/dms-colors.json"
+        blockLoading: true
+        printErrors: false
+    }
+
     FileView {
         id: input
         path: root.inPath
@@ -53,8 +118,8 @@ ShellRoot {
         Rectangle {
             anchors.fill: parent
             radius: 12
-            color: "#1e1e2e"
-            border.color: "#89b4fa"
+            color: root.background
+            border.color: root.accent
             border.width: 2
 
             Column {
@@ -64,7 +129,7 @@ ShellRoot {
 
                 Text {
                     text: "音声入力: 直してから Ctrl+Enter で貼り付け（Enter は改行、Esc でやめる）"
-                    color: "#a6adc8"
+                    color: root.muted
                     font.pixelSize: 13
                 }
 
@@ -83,9 +148,10 @@ ShellRoot {
 
                         text: input.text().replace(/\n$/, "")
                         wrapMode: TextEdit.Wrap
-                        color: "#cdd6f4"
-                        selectionColor: "#585b70"
-                        selectedTextColor: "#cdd6f4"
+                        color: root.foreground
+                        selectionColor: Qt.alpha(root.accent, 0.35)
+                        selectedTextColor: root.foreground
+                        palette.text: root.foreground
                         font.pixelSize: 18
                         focus: true
                         background: null

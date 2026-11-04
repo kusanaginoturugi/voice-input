@@ -87,11 +87,15 @@ EOF
   mock curl <<'EOF'
 out=
 payload=
+prompt=
 is_llm=0
 is_judge=0
 while [ "$#" -gt 0 ]; do
   [ "$1" = -o ] && out=$2
   [ "$1" = --data-binary ] && payload=$2
+  if [ "$1" = --form-string ]; then
+    case "$2" in prompt=*) prompt=${2#prompt=} ;; esac
+  fi
   case "$1" in *chat/completions) is_llm=1 ;; *systemone) is_judge=1 ;; esac
   shift
 done
@@ -127,8 +131,11 @@ if [ "$is_llm" = 1 ]; then
   exit 0
 fi
 echo curl whisper >> "$T/calls"
+printf '%s\n' "$prompt" >> "$T/whisper-prompts"
 case "$MOCK_CURL" in
   ok) printf '%s\n' "$MOCK_GPU_TEXT" > "$out" ;;
+  # プロンプト付きのときだけ空を返す
+  empty_with_prompt) if [ -n "$prompt" ]; then : > "$out"; else printf '%s\n' "$MOCK_GPU_TEXT" > "$out"; fi ;;
   empty) : > "$out" ;;
   fail) echo 'connection refused' >&2; exit 7 ;;
 esac
@@ -723,6 +730,73 @@ EOF
   grep -q 本文 "$XDG_STATE_HOME/voice-input/dictionary-candidates.jsonl"
   run "$CTL" dict add $'a\tb' c
   [ "$status" -eq 2 ]
+}
+
+@test "prompt.txt の言葉と辞書の正しい言葉を Whisper のプロンプトにして送る" {
+  mkdir -p "$XDG_CONFIG_HOME/voice-input"
+  printf '# よく使う言葉\nClaude Code\nHyprland、quickshell, SKK\n\n' > "$XDG_CONFIG_HOME/voice-input/prompt.txt"
+  printf '木字\t目次\n# 注出\t抽出\n多数結\t多数決\nquickshel\tquickshell\n' > "$XDG_CONFIG_HOME/voice-input/dictionary.tsv"
+  start_fake_recording
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$T/whisper-prompts")" = 'Claude Code、Hyprland、quickshell、SKK、目次、多数決' ]
+  jq -e '.whisper_prompt == "Claude Code、Hyprland、quickshell、SKK、目次、多数決" and .prompt_retried == false' \
+    "$XDG_STATE_HOME/voice-input/history.jsonl"
+}
+
+@test "Whisper のプロンプトは上限の文字数までにする" {
+  mkdir -p "$XDG_CONFIG_HOME/voice-input"
+  printf 'あいうえお\nかきくけこ\nさしすせそ\n' > "$XDG_CONFIG_HOME/voice-input/prompt.txt"
+  export VOICE_INPUT_PROMPT_MAX=12
+  start_fake_recording
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$T/whisper-prompts")" = 'あいうえお、かきくけこ' ]
+}
+
+@test "言葉がなければ Whisper にプロンプトを付けない" {
+  start_fake_recording
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$T/whisper-prompts")" = '' ]
+  [ "$(jq -r '.whisper_prompt' "$XDG_STATE_HOME/voice-input/history.jsonl")" = '' ]
+}
+
+@test "VOICE_INPUT_PROMPT=0 なら Whisper にプロンプトを付けない" {
+  mkdir -p "$XDG_CONFIG_HOME/voice-input"
+  echo 'Claude Code' > "$XDG_CONFIG_HOME/voice-input/prompt.txt"
+  export VOICE_INPUT_PROMPT=0
+  start_fake_recording
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$T/whisper-prompts")" = '' ]
+}
+
+@test "プロンプト付きで空が返ったら、プロンプトを外して GPU でやり直す" {
+  mkdir -p "$XDG_CONFIG_HOME/voice-input"
+  echo 'Claude Code' > "$XDG_CONFIG_HOME/voice-input/prompt.txt"
+  MOCK_CURL=empty_with_prompt
+  start_fake_recording
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  # 1回目はプロンプト付き、2回目はなし
+  [ "$(wc -l < "$T/whisper-prompts")" -eq 2 ]
+  [ "$(sed -n 1p "$T/whisper-prompts")" = 'Claude Code' ]
+  [ "$(sed -n 2p "$T/whisper-prompts")" = '' ]
+  [ "$(cat "$T/typed")" = 'GPUの結果 ' ]
+  ! grep -q '^whisper-cli' "$T/calls" || false
+  [ "$(jq -r '.prompt_retried' "$XDG_STATE_HOME/voice-input/history.jsonl")" = true ]
+}
+
+@test "CPU に切り替えたときもプロンプトを付ける" {
+  mkdir -p "$XDG_CONFIG_HOME/voice-input"
+  echo '@Claude Code' > "$XDG_CONFIG_HOME/voice-input/prompt.txt"
+  MOCK_CURL=fail
+  start_fake_recording
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  grep -q -- ' -nt --prompt @Claude Code -otxt ' "$T/calls"
+  [ "$(cat "$T/typed")" = 'CPUの結果 ' ]
 }
 
 @test "改行は空白にし、- で始まる文もそのまま入力する" {

@@ -37,6 +37,9 @@ dictionary_file="${XDG_CONFIG_HOME:-$HOME/.config}/voice-input/dictionary.tsv"
 candidates_file="$log_dir/dictionary-candidates.jsonl"
 promote_count="${VOICE_INPUT_DICT_PROMOTE:-2}"
 dialog_timeout="${VOICE_INPUT_DIALOG_TIMEOUT:-1800}"
+prompt_enabled="${VOICE_INPUT_PROMPT:-1}"
+prompt_file="${XDG_CONFIG_HOME:-$HOME/.config}/voice-input/prompt.txt"
+prompt_max="${VOICE_INPUT_PROMPT_MAX:-120}"
 dialog_state="$state_dir/dialog-state.json"
 dialog_rc_file="$state_dir/dialog-rc"
 dialog_pid_file="$state_dir/dialog.pid"
@@ -228,6 +231,51 @@ $pairs
 EOF
 }
 
+# Whisper の初期プロンプト。出てきそうな言葉を渡すと、聞き取りがその言葉に寄る。
+# prompt.txt の言葉（1行1語か、読点区切り。# で始まる行は飛ばす）を先に、辞書の「正」の言葉を後に読点でつなぐ。
+# 文章で渡すと「もう言った」と見なして何も返さないことがあるので、言葉だけを並べる。
+# 長すぎると Whisper が切り捨てるので prompt_max 文字までにする
+build_prompt() {
+  [ "$prompt_enabled" = 1 ] || return 0
+  {
+    if [ -r "$prompt_file" ]; then grep -v '^#' "$prompt_file" || true; fi
+    if [ -r "$dictionary_file" ]; then grep -v '^#' "$dictionary_file" | cut -f 2 || true; fi
+  } | jq -Rrn --argjson max "$prompt_max" '
+    [inputs | splits("[,、]") | gsub("^\\s+|\\s+$"; "") | select(length > 0)]
+    | reduce .[] as $word ([]; if any(.[]; . == $word) then . else . + [$word] end)
+    | reduce .[] as $word (""; if . == "" then (if ($word | length) <= $max then $word else . end)
+        elif (length + 1 + ($word | length)) <= $max then . + "、" + $word else . end)'
+}
+
+has_text() {
+  [ -f "$text_base.txt" ] && grep -q '[^[:space:]]' "$text_base.txt"
+}
+
+# GPU の whisper-server で文字起こしする。$1 は初期プロンプト（空なら付けない）。
+# プロンプトは @ や < で始まるとファイル扱いになる -F ではなく --form-string で送る
+transcribe_gpu() {
+  rm -f "$text_base.txt"
+  if [ -n "$1" ]; then
+    set -- --form-string "prompt=$1"
+  else
+    set --
+  fi
+  curl --fail --silent --show-error --connect-timeout 1 --max-time 300 \
+    -F "file=@$audio;type=audio/wav" -F 'language=ja' \
+    -F 'no_timestamps=true' -F 'response_format=text' "$@" \
+    "$whisper_url" -o "$text_base.txt" 2>"$state_dir/gpu.log"
+}
+
+transcribe_cpu() {
+  rm -f "$text_base.txt"
+  if [ -n "$1" ]; then
+    set -- --prompt "$1"
+  else
+    set --
+  fi
+  "$whisper_cli" -t 12 -m "$cpu_model" -f "$audio" -l ja -nt "$@" -otxt -of "$text_base" >/dev/null 2>"$state_dir/cpu.log"
+}
+
 dialog_available() {
   [ "$dialog_enabled" = 1 ] && [ -r "$dialog_qml" ] && command -v qs >/dev/null 2>&1
 }
@@ -371,26 +419,34 @@ if [ -f "$pid_file" ]; then
   rm -f "$text_base.txt"
   processing_started_ms=$(date +%s%3N)
   whisper_model="${VOICE_INPUT_WHISPER_MODEL:-ggml-medium-q8_0.bin}"
-  if ! curl --fail --silent --show-error --connect-timeout 1 --max-time 300 \
-    -F "file=@$audio;type=audio/wav" -F 'language=ja' \
-    -F 'no_timestamps=true' -F 'response_format=text' \
-    "$whisper_url" -o "$text_base.txt" 2>"$state_dir/gpu.log" || [ ! -s "$text_base.txt" ]; then
+  whisper_prompt=$(build_prompt 2>/dev/null) || whisper_prompt=
+  prompt_retried=false
+  # プロンプト付きで空が返ったら、プロンプトに引っ張られて何も書かなかったとみなし、外してやり直す
+  if transcribe_gpu "$whisper_prompt" && ! has_text && [ -n "$whisper_prompt" ]; then
+    prompt_retried=true
+    transcribe_gpu '' || true
+  fi
+  if ! has_text; then
     "$hud" -s off --no-voice '音声入力: GPU処理失敗、CPUへ切替' >/dev/null 2>&1 || true
     "$hud_status_cmd" set voice-input '音声入力: CPUで処理中' >/dev/null 2>&1 || true
     if [ ! -f "$cpu_model" ] || [ ! -x "$whisper_cli" ]; then
       exit 1
     fi
     whisper_model=${cpu_model##*/}
-    if ! "$whisper_cli" -t 12 -m "$cpu_model" -f "$audio" -l ja -nt -otxt -of "$text_base" >/dev/null 2>"$state_dir/cpu.log"; then
+    if ! transcribe_cpu "$whisper_prompt"; then
       # パッケージ版 whisper-cli も GPU を使うので、VRAM が埋まっていると落ちる
       if grep -q 'out of memory' "$state_dir/cpu.log"; then
         "$hud" -s off --no-voice '音声入力: VRAM不足で処理できません' >/dev/null 2>&1 || true
       fi
       exit 1
     fi
+    if ! has_text && [ -n "$whisper_prompt" ]; then
+      prompt_retried=true
+      transcribe_cpu '' || exit 1
+    fi
   fi
 
-  if [ ! -s "$text_base.txt" ]; then
+  if ! has_text; then
     exit 1
   fi
 
@@ -534,8 +590,9 @@ if [ -f "$pid_file" ]; then
       --argjson whisper_ms "$whisper_ms" --argjson cleanup_ms "$cleanup_ms" \
       --argjson total_ms "$total_ms" \
       --arg shown_text "$shown_text" --arg dialog_status "$dialog_status" --argjson dialog_ms "$dialog_ms" \
+      --arg whisper_prompt "$whisper_prompt" --argjson prompt_retried "$prompt_retried" \
       --argjson dictionary_fixes "$dictionary_fixes" --argjson learned "$learned" --argjson promoted "$promoted" \
-      '{id:$id,timestamp:$timestamp,whisper_model:$whisper_model,llm_model:$llm_model,cleanup_status:$cleanup_status,fix_status:$fix_status,fixes:$fixes,rejected_fixes:$rejected_fixes,dictionary_fixes:$dictionary_fixes,raw_text:$raw_text,shown_text:$shown_text,output_text:$output_text,dialog_status:$dialog_status,learned:$learned,promoted:$promoted,whisper_ms:$whisper_ms,cleanup_ms:$cleanup_ms,total_ms:$total_ms,dialog_ms:$dialog_ms}') || record=
+      '{id:$id,timestamp:$timestamp,whisper_model:$whisper_model,whisper_prompt:$whisper_prompt,prompt_retried:$prompt_retried,llm_model:$llm_model,cleanup_status:$cleanup_status,fix_status:$fix_status,fixes:$fixes,rejected_fixes:$rejected_fixes,dictionary_fixes:$dictionary_fixes,raw_text:$raw_text,shown_text:$shown_text,output_text:$output_text,dialog_status:$dialog_status,learned:$learned,promoted:$promoted,whisper_ms:$whisper_ms,cleanup_ms:$cleanup_ms,total_ms:$total_ms,dialog_ms:$dialog_ms}') || record=
     if [ -n "$record" ]; then
       if mkdir -p "$log_dir" && chmod 700 "$log_dir" &&
         touch "$log_file" && chmod 600 "$log_file" && printf '%s\n' "$record" >> "$log_file"; then

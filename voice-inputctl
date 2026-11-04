@@ -5,6 +5,8 @@ umask 077
 default_model=gemma-4-E4B-it-qat
 config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/voice-input"
 model_file="$config_dir/model"
+dictionary_file="$config_dir/dictionary.tsv"
+candidates_file="${XDG_STATE_HOME:-$HOME/.local/state}/voice-input/dictionary-candidates.jsonl"
 history_file="${XDG_STATE_HOME:-$HOME/.local/state}/voice-input/history.jsonl"
 judge_file="${XDG_STATE_HOME:-$HOME/.local/state}/voice-input/judgments.jsonl"
 server_url="${VOICE_INPUT_LLM_BASE_URL:-http://127.0.0.1:8080}"
@@ -20,6 +22,9 @@ usage() {
   voice-inputctl model ID        清書モデルを指定して保存
   voice-inputctl model reset     既定モデルに戻す
   voice-inputctl logs [条件]     履歴を絞り込む
+  voice-inputctl dict            辞書と学習候補（回数）を表示
+  voice-inputctl dict add 誤 正  辞書に追加
+  voice-inputctl dict rm 誤      辞書から消す（学習候補からも消す）
 
 履歴の条件:
   --model 文字列    Whisper または清書モデル名に含まれる文字列
@@ -81,7 +86,7 @@ show_entry() {
   local filtered_file=$1 index=$2
   jq -r -s --argjson index "$index" '
     .[$index] |
-    "日時: \(.timestamp)\nWhisper: \(.whisper_model) (\(.whisper_ms) ms)\n清書: \(.llm_model) [\(.cleanup_status)] (\(.cleanup_ms) ms)\n全体: \(.total_ms) ms\n誤変換: \(if (.fix_status // "disabled") == "disabled" then "対象外" else "[\(.fix_status)] \(if (.fixes // []) == [] then "修正なし" else ((.fixes // []) | map("\(.wrong)→\(.right)") | join("、")) end)\(if (.rejected_fixes // []) == [] then "" else "（不採用: \((.rejected_fixes // []) | map("\(.wrong)→\(.right)") | join("、"))）" end)" end)\n評価: \(if .judge == null then "未評価" elif .judge.status == "ok" then "\(.judge.score)点 / \(.judge.judge_model) (\(.judge.judge_ms) ms)\n判定: \(.judge.reason)" else "失敗 / \(.judge.judge_model)" end)\n\n原文:\n\(.raw_text)\n\n入力文:\n\(.output_text)"
+    "日時: \(.timestamp)\nWhisper: \(.whisper_model) (\(.whisper_ms) ms)\n清書: \(.llm_model) [\(.cleanup_status)] (\(.cleanup_ms) ms)\n全体: \(.total_ms) ms\n確認: \(.dialog_status // "なし")\(if (.dictionary_fixes // []) == [] then "" else "\n辞書: \((.dictionary_fixes // []) | map("\(.wrong)→\(.right)") | join("、"))" end)\(if (.learned // []) == [] then "" else "\n学習: \((.learned // []) | map("\(.wrong)→\(.right)") | join("、"))" end)\n誤変換: \(if (.fix_status // "disabled") == "disabled" then "対象外" else "[\(.fix_status)] \(if (.fixes // []) == [] then "修正なし" else ((.fixes // []) | map("\(.wrong)→\(.right)") | join("、")) end)\(if (.rejected_fixes // []) == [] then "" else "（不採用: \((.rejected_fixes // []) | map("\(.wrong)→\(.right)") | join("、"))）" end)" end)\n評価: \(if .judge == null then "未評価" elif .judge.status == "ok" then "\(.judge.score)点 / \(.judge.judge_model) (\(.judge.judge_ms) ms)\n判定: \(.judge.reason)" else "失敗 / \(.judge.judge_model)" end)\n\n原文:\n\(.raw_text)\n\n入力文:\n\(.output_text)"
   ' "$filtered_file"
 }
 
@@ -147,16 +152,65 @@ show_logs() {
   fi
 }
 
+show_dictionary() {
+  printf '辞書 (%s):\n' "$dictionary_file"
+  if [[ -s $dictionary_file ]]; then
+    grep -v -e '^#' -e '^$' "$dictionary_file" | sed 's/\t/ → /; s/^/  /'
+  else
+    printf '  （なし）\n'
+  fi
+  printf '\n学習候補（回数）:\n'
+  if [[ -s $candidates_file ]]; then
+    jq -rs 'group_by([.wrong, .right]) | sort_by(-length) | .[] |
+      "  \(length)回  \(.[0].wrong) → \(.[0].right)"' "$candidates_file"
+  else
+    printf '  （なし）\n'
+  fi
+}
+
+add_dictionary() {
+  local wrong=$1 right=$2
+  if [[ -z $wrong || $wrong == *$'\t'* || $right == *$'\t'* || $wrong == *$'\n'* || $right == *$'\n'* ]]; then
+    printf '誤と正にタブや改行は使えません\n' >&2
+    return 2
+  fi
+  mkdir -p "$config_dir"
+  if ! grep -qxF "$wrong"$'\t'"$right" "$dictionary_file" 2>/dev/null; then
+    printf '%s\t%s\n' "$wrong" "$right" >> "$dictionary_file"
+  fi
+  printf '辞書に追加: %s → %s\n' "$wrong" "$right"
+}
+
+remove_dictionary() {
+  local wrong=$1 tmp
+  if [[ -f $dictionary_file ]]; then
+    tmp=$(mktemp "$dictionary_file.XXXXXX")
+    tmp_file_to_remove=$tmp
+    awk -F '\t' -v wrong="$wrong" '$1 != wrong' "$dictionary_file" > "$tmp"
+    mv -- "$tmp" "$dictionary_file"
+  fi
+  # 候補に残すと、次に1回直しただけで辞書に戻るので消す
+  if [[ -f $candidates_file ]]; then
+    tmp=$(mktemp "$candidates_file.XXXXXX")
+    tmp_file_to_remove=$tmp
+    jq -c --arg wrong "$wrong" 'select(.wrong != $wrong)' "$candidates_file" > "$tmp"
+    mv -- "$tmp" "$candidates_file"
+  fi
+  tmp_file_to_remove=''
+  printf '辞書から削除: %s\n' "$wrong"
+}
+
 menu() {
   if [[ ! -t 0 || ! -t 1 ]]; then usage; return; fi
   command -v fzf >/dev/null || { printf 'fzf が必要です\n' >&2; return 1; }
   local selected
-  selected=$(printf '%s\n' 'モデルを選ぶ' '履歴を見る' '低スコアを見る' '現在のモデルを見る' |
+  selected=$(printf '%s\n' 'モデルを選ぶ' '履歴を見る' '低スコアを見る' '辞書を見る' '現在のモデルを見る' |
     fzf --prompt='音声入力> ') || return 0
   case $selected in
     'モデルを選ぶ') choose_model ;;
     '履歴を見る') show_logs ;;
     '低スコアを見る') show_logs --max-score 69 ;;
+    '辞書を見る') show_dictionary ;;
     '現在のモデルを見る') current_model ;;
   esac
 }
@@ -171,6 +225,13 @@ case ${1:-} in
       *) set_model "$2" ;;
     esac ;;
   logs) shift; show_logs "$@" ;;
+  dict)
+    case ${2:-} in
+      '') show_dictionary ;;
+      add) [[ $# -eq 4 ]] || { usage >&2; exit 2; }; add_dictionary "$3" "$4" ;;
+      rm) [[ $# -eq 3 ]] || { usage >&2; exit 2; }; remove_dictionary "$3" ;;
+      *) usage >&2; exit 2 ;;
+    esac ;;
   help|-h|--help) usage ;;
   *) usage >&2; exit 2 ;;
 esac

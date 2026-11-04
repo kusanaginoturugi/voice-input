@@ -30,6 +30,12 @@ hud_status_cmd="$HOME/.local/bin/hud-status"
 text_base="$state_dir/transcript"
 hud_status="$state_dir/hud-status"
 volume_file="$state_dir/sink-volume"
+target_file="$state_dir/target-window"
+dialog_enabled="${VOICE_INPUT_DIALOG:-1}"
+dialog_qml="${VOICE_INPUT_DIALOG_QML:-${XDG_DATA_HOME:-$HOME/.local/share}/voice-input/voice-input-dialog.qml}"
+dictionary_file="${XDG_CONFIG_HOME:-$HOME/.config}/voice-input/dictionary.tsv"
+candidates_file="$log_dir/dictionary-candidates.jsonl"
+promote_count="${VOICE_INPUT_DICT_PROMOTE:-2}"
 
 restore_volume() {
   if [ -f "$volume_file" ]; then
@@ -134,6 +140,117 @@ fix_typos() {
   done <<EOF
 $fixes
 EOF
+}
+
+# 辞書（誤 TAB 正 の行）で置き換える。# で始まる行と空行は飛ばす
+apply_dictionary() {
+  [ -r "$dictionary_file" ] || return 0
+  tab=$(printf '\t')
+  while IFS="$tab" read -r wrong right; do
+    case "$wrong" in
+      ''|'#'*) continue ;;
+    esac
+    case "$transcript" in
+      *"$wrong"*) ;;
+      *) continue ;;
+    esac
+    transcript=$(jq -rn --arg text "$transcript" --arg wrong "$wrong" --arg right "$right" '$text | split($wrong) | join($right)')
+    dictionary_fixes=$(printf '%s' "$dictionary_fixes" | jq -c --arg wrong "$wrong" --arg right "$right" '. + [{wrong: $wrong, right: $right}]')
+  done < "$dictionary_file"
+}
+
+# 表示した文 $1 と送信した文 $2 を1文字ずつ diff で比べ、置き換えた語の組を「誤 TAB 正」で1行ずつ出す。
+# 変わった部分は前後の漢字・カタカナ・英数字のまとまりまで広げる（注→抽 ではなく 注出→抽出 として覚える）。
+# 書き換えが全体の半分を超える文、1文字だけの組、空白・改行・句読点を含む組は覚えない
+learn_pairs() {
+  jq -rn --arg text "$1" '$text | explode[]' > "$state_dir/learn-before"
+  jq -rn --arg text "$2" '$text | explode[]' > "$state_dir/learn-after"
+  hunks=$(diff "$state_dir/learn-before" "$state_dir/learn-after" | grep -E '^[0-9]') || true
+  jq -rn --arg before "$1" --arg after "$2" --arg hunks "$hunks" '
+    def word: (. >= 48 and . <= 57) or (. >= 65 and . <= 90) or (. >= 97 and . <= 122)
+      or (. >= 12449 and . <= 12538) or . == 12540
+      or (. >= 13312 and . <= 40959) or . == 12293
+      or (. >= 65296 and . <= 65305) or (. >= 65313 and . <= 65338) or (. >= 65345 and . <= 65370);
+    def sep: . <= 32 or . == 12288 or (. >= 33 and . <= 47) or (. >= 58 and . <= 64)
+      or (. >= 91 and . <= 96) or (. >= 123 and . <= 126)
+      or . == 12289 or . == 12290 or . == 65281 or . == 65292 or . == 65294 or . == 65311;
+    def span: split(",") | map(tonumber) | [.[0], (.[1] // .[0])];
+    def size: span | .[1] - .[0] + 1;
+    ($before | explode) as $b | ($after | explode) as $a |
+    [$hunks | splits("\n") | select(length > 0)
+      | capture("^(?<l>[0-9,]+)(?<op>[acd])(?<r>[0-9,]+)$")] as $hs |
+    ([$hs[] | if .op == "a" then (.r | size) elif .op == "d" then (.l | size)
+      else [(.l | size), (.r | size)] | max end] | add // 0) as $changed |
+    if ($b | length) == 0 or $changed > ([($b | length), ($a | length)] | max) * 0.5 then empty else
+      $hs[] | select(.op == "c") |
+      (.l | span) as [$bs, $be] | (.r | span) as [$as, $ae] |
+      {bs: ($bs - 1), be: $be, as: ($as - 1), ae: $ae} |
+      select(($b[.bs:.be] + $a[.as:.ae]) | any(sep) | not) |
+      until(.bs == 0 or .as == 0 or ($b[.bs - 1] | word | not) or $b[.bs - 1] != $a[.as - 1];
+        .bs -= 1 | .as -= 1) |
+      until(.be == ($b | length) or .ae == ($a | length) or ($b[.be] | word | not) or $b[.be] != $a[.ae];
+        .be += 1 | .ae += 1) |
+      {wrong: ($b[.bs:.be] | implode), right: ($a[.as:.ae] | implode)} |
+      select((.wrong | length) >= 2 and (.wrong | length) <= 12 and (.right | length) <= 12) |
+      [.wrong, .right] | @tsv
+    end'
+}
+
+# 直した組を学習候補に記録し、同じ組が promote_count 回たまったら辞書に入れる
+learn_from_edit() {
+  pairs=$(learn_pairs "$1" "$2" 2>/dev/null) || return 0
+  [ -n "$pairs" ] || return 0
+  mkdir -p "$log_dir" "${dictionary_file%/*}" || return 0
+  tab=$(printf '\t')
+  while IFS="$tab" read -r wrong right; do
+    [ -n "$wrong" ] || continue
+    pair=$(jq -nc --arg wrong "$wrong" --arg right "$right" '{wrong: $wrong, right: $right}')
+    printf '%s\n' "$pair" | jq -c --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '. + {timestamp: $timestamp}' >> "$candidates_file"
+    learned=$(printf '%s' "$learned" | jq -c --argjson pair "$pair" '. + [$pair]')
+    count=$(jq -s --argjson pair "$pair" 'map(select(.wrong == $pair.wrong and .right == $pair.right)) | length' "$candidates_file")
+    if [ "$count" -ge "$promote_count" ] && ! grep -qxF "$wrong$tab$right" "$dictionary_file" 2>/dev/null; then
+      printf '%s\t%s\n' "$wrong" "$right" >> "$dictionary_file"
+      promoted=$(printf '%s' "$promoted" | jq -c --argjson pair "$pair" '. + [$pair]')
+      "$hud" -s off --no-voice "音声入力: 辞書に追加 $wrong→$right" >/dev/null 2>&1 || true
+    fi
+  done <<EOF
+$pairs
+EOF
+}
+
+# 確認ダイアログで直してもらう。送信なら edited に入れて 0、やめたら 1、ダイアログを使えなければ 2
+edit_in_dialog() {
+  if [ "$dialog_enabled" != 1 ] || [ ! -r "$dialog_qml" ] || ! command -v qs >/dev/null 2>&1; then
+    return 2
+  fi
+  rm -f "$state_dir/dialog-out.txt" "$state_dir/dialog-cancel"
+  printf '%s\n' "$1" > "$state_dir/dialog-in.txt"
+  VOICE_INPUT_DIALOG_IN="$state_dir/dialog-in.txt" \
+    VOICE_INPUT_DIALOG_OUT="$state_dir/dialog-out.txt" \
+    VOICE_INPUT_DIALOG_CANCEL="$state_dir/dialog-cancel" \
+    qs -p "$dialog_qml" >"$state_dir/dialog.log" 2>&1 || true
+  if [ -f "$state_dir/dialog-out.txt" ]; then
+    edited=$(cat "$state_dir/dialog-out.txt")
+    return 0
+  fi
+  [ ! -f "$state_dir/dialog-cancel" ] || return 1
+  return 2
+}
+
+# 録音を始めたときに前面にあったウィンドウへフォーカスを戻す。そのウィンドウが閉じられていたら 1
+focus_target() {
+  target=$(cat "$target_file" 2>/dev/null) || return 0
+  case "$target" in
+    0x*) ;;
+    *) return 0 ;;
+  esac
+  case "${target#0x}" in
+    *[!0-9a-f]*) return 0 ;;
+  esac
+  current=$(hyprctl activewindow -j 2>/dev/null | jq -r '.address // empty' 2>/dev/null) || current=
+  [ "$current" != "$target" ] || return 0
+  [ "$(hyprctl dispatch "hl.dsp.focus({ window = \"address:$target\" })" 2>&1)" = ok ] || return 1
+  sleep 0.1
 }
 
 mkdir -p "$state_dir"
@@ -254,13 +371,48 @@ if [ -f "$pid_file" ]; then
     if [ "$cleanup_enabled" = 3 ] && [ "$cleanup_status" != failed ]; then
       fix_typos
     fi
-    [ "$transcript" = "$raw_transcript" ] || printf '%s\n' "$transcript" > "$text_base.cleaned.txt"
     cleanup_ms=$(( $(date +%s%3N) - cleanup_started_ms ))
+  fi
+  dictionary_fixes='[]'
+  apply_dictionary
+  [ "$transcript" = "$raw_transcript" ] || printf '%s\n' "$transcript" > "$text_base.cleaned.txt"
+
+  # 確認ダイアログで直してから貼る。待ち時間は処理時間に含めない
+  total_ms=$(( $(date +%s%3N) - processing_started_ms ))
+  shown_text=$transcript
+  learned='[]'
+  promoted='[]'
+  dialog_status=disabled
+  dialog_ms=0
+  rm -f "$hud_status"
+  "$hud_status_cmd" clear voice-input >/dev/null 2>&1 || true
+  dialog_started_ms=$(date +%s%3N)
+  dialog_result=0
+  edit_in_dialog "$transcript" || dialog_result=$?
+  case "$dialog_result" in
+    0)
+      dialog_status=submitted
+      transcript=$edited
+      [ -n "$transcript" ] || dialog_status=cancelled
+      ;;
+    1) dialog_status=cancelled ;;
+    *) [ "$dialog_enabled" != 1 ] || dialog_status=unavailable ;;
+  esac
+  [ "$dialog_status" = disabled ] || dialog_ms=$(( $(date +%s%3N) - dialog_started_ms ))
+  if [ "$dialog_status" = cancelled ]; then
+    transcript=
+  elif [ "$dialog_status" = submitted ] && ! focus_target; then
+    # 貼り先がなくなっていたら、貼らずにクリップボードへ残す
+    printf '%s' "$transcript" | wl-copy
+    "$hud" -s off --no-voice '音声入力: 元のウィンドウがないので、クリップボードにコピーしました' >/dev/null 2>&1 || true
+    dialog_status=target_lost
   fi
   # Hyprland 設定が voice_input_paste を公開していれば、SUPER + V と同じ貼り付けで入力する。
   # 貼り付けは IME を通らないので、長い文でも SKK で崩れない。
   # 清書結果をクリップボードに入れ直すので、原文はクリップボード履歴に残る
-  if hyprctl eval 'assert(type(voice_input_paste) == "function")' >/dev/null 2>&1; then
+  if [ "$dialog_status" = cancelled ] || [ "$dialog_status" = target_lost ]; then
+    :
+  elif hyprctl eval 'assert(type(voice_input_paste) == "function")' >/dev/null 2>&1; then
     [ "$transcript" = "$raw_transcript" ] || printf '%s' "$transcript" | wl-copy
     hyprctl eval 'voice_input_paste()' >/dev/null
   else
@@ -271,7 +423,8 @@ if [ -f "$pid_file" ]; then
       restore_ime=1
       sleep 0.05
     fi
-    printf '%s' "$transcript" | wtype -
+    # 打鍵では改行が Enter になり、その場で送信するアプリがあるので空白にする
+    printf '%s' "$transcript" | tr '\n' ' ' | wtype -
     if [ "$ime_state" = 2 ]; then
       # wtype はキーを送り終えた時点で戻るが、アプリが受け取り終えるのはその後になる。
       # 受け取り終えたかは外から分からないので、文が長いほど長めに待ってから IME を戻す
@@ -284,8 +437,10 @@ if [ -f "$pid_file" ]; then
       restore_ime=0
     fi
   fi
+  if [ "$dialog_status" = submitted ] && [ "$transcript" != "$shown_text" ]; then
+    learn_from_edit "$shown_text" "$transcript"
+  fi
   if [ "$log_enabled" = 1 ] && command -v jq >/dev/null 2>&1; then
-    total_ms=$(( $(date +%s%3N) - processing_started_ms ))
     record_id="$(date -u +%Y%m%dT%H%M%S%N)-$$"
     record=$(jq -nc \
       --arg id "$record_id" \
@@ -296,11 +451,13 @@ if [ -f "$pid_file" ]; then
       --arg raw_text "$raw_transcript" --arg output_text "$transcript" \
       --argjson whisper_ms "$whisper_ms" --argjson cleanup_ms "$cleanup_ms" \
       --argjson total_ms "$total_ms" \
-      '{id:$id,timestamp:$timestamp,whisper_model:$whisper_model,llm_model:$llm_model,cleanup_status:$cleanup_status,fix_status:$fix_status,fixes:$fixes,rejected_fixes:$rejected_fixes,raw_text:$raw_text,output_text:$output_text,whisper_ms:$whisper_ms,cleanup_ms:$cleanup_ms,total_ms:$total_ms}') || record=
+      --arg shown_text "$shown_text" --arg dialog_status "$dialog_status" --argjson dialog_ms "$dialog_ms" \
+      --argjson dictionary_fixes "$dictionary_fixes" --argjson learned "$learned" --argjson promoted "$promoted" \
+      '{id:$id,timestamp:$timestamp,whisper_model:$whisper_model,llm_model:$llm_model,cleanup_status:$cleanup_status,fix_status:$fix_status,fixes:$fixes,rejected_fixes:$rejected_fixes,dictionary_fixes:$dictionary_fixes,raw_text:$raw_text,shown_text:$shown_text,output_text:$output_text,dialog_status:$dialog_status,learned:$learned,promoted:$promoted,whisper_ms:$whisper_ms,cleanup_ms:$cleanup_ms,total_ms:$total_ms,dialog_ms:$dialog_ms}') || record=
     if [ -n "$record" ]; then
       if mkdir -p "$log_dir" && chmod 700 "$log_dir" &&
         touch "$log_file" && chmod 600 "$log_file" && printf '%s\n' "$record" >> "$log_file"; then
-        if [ "$judge_enabled" = 1 ] && [ "$cleanup_status" = applied ] && [ -x "$judge_cmd" ]; then
+        if [ "$judge_enabled" = 1 ] && [ "$cleanup_status" = applied ] && [ "$dialog_status" != cancelled ] && [ -x "$judge_cmd" ]; then
           (printf '%s\n' "$record" | "$judge_cmd" >/dev/null 2>&1) </dev/null >/dev/null 2>&1 &
         fi
       fi
@@ -312,5 +469,7 @@ fi
 restore_volume
 lower_volume
 rm -f "$audio" "$text_base.txt"
+# 貼り先は、録音を始めたときに前面にあったウィンドウ
+hyprctl activewindow -j 2>/dev/null | jq -r '.address // empty' > "$target_file" 2>/dev/null || rm -f "$target_file"
 pw-record --rate 16000 --channels 1 "$audio" >/dev/null 2>&1 &
 printf '%s\n' "$!" > "$pid_file"

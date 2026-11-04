@@ -1,19 +1,57 @@
 # voice-input
 
-`SUPER + H` で音声入力を開始し、もう一度押すと止める。録音中は現在の出力音量を20%に下げ、停止キーで元に戻す。停止後に録音全体を GPU の Whisper サーバーで文字起こしし、原文をクリップボードへコピーし、`SUPER + V` と同じ方法で現在の入力先へ貼り付ける。ローカル LLM による清書は既定で無効で、`VOICE_INPUT_CLEANUP=1` で有効にできる。
+`SUPER + H` で音声入力を開始し、もう一度押すと止める。録音中は現在の出力音量を20%に下げ、停止キーで元に戻す。停止後に録音全体を GPU の Whisper サーバーで文字起こしし、確認ダイアログに出す。直して `Ctrl + Enter` で送信すると、録音を始めたときのウィンドウへ `SUPER + V` と同じ方法で貼り付ける。ダイアログで直した語は学習し、同じ直しが2回たまると辞書に入って次から自動で直る。ローカル LLM による清書は既定で無効で、`VOICE_INPUT_CLEANUP=1` で有効にできる。
 
 動画「ローカル LLM で遊ぼう 第2弾」で解説している簡略版（Hyprland などに依存しない 1 ファイル版）は [`lite/`](lite/) にあります。
 
 ## 動作仕様
 
-1. 1回目の `SUPER + H` で録音を開始する。既定の出力先と音量を保存し、その出力先を元の20%に下げる。録音は `${XDG_RUNTIME_DIR}/voice-input/input.wav` に保存する。
+1. 1回目の `SUPER + H` で録音を開始する。既定の出力先と音量を保存し、その出力先を元の20%に下げる。録音は `${XDG_RUNTIME_DIR}/voice-input/input.wav` に保存する。そのとき前面にあるウィンドウを貼り先として `target-window` に覚える。
 2. 2回目の `SUPER + H` で録音を止め、出力音量をすぐに戻す。録音中には文字を入力しない。
 3. 録音全体を `127.0.0.1:8082/inference` に送り、日本語・タイムスタンプなしのテキストを取得する。GPU 処理が失敗するか空の結果を返した場合は、HUD に切替を表示して CPU の small モデルで同じ録音を再処理する。
 4. 清書を有効にした場合（`VOICE_INPUT_CLEANUP=1`）、10文字以上の認識結果はローカルの llama.cpp に送り、フィラーと言い直しの削除、句読点の調整を依頼する。15秒以内に清書できない場合や結果が空の場合は原文を使う。
-5. Whisper の原文をクリップボードへコピーする。清書した場合は清書結果をコピーし直すので、原文は DMS のクリップボード履歴（`SUPER + CTRL + V`）に残る。次に `hyprctl eval 'voice_input_paste()'` で、`SUPER + V` と同じ貼り付けキー（端末は `Ctrl+Shift+V`、それ以外は `Ctrl+V`）を Hyprland から入力先へ送る。貼り付けは IME を通らないので、IME が有効でも長い文が崩れない。Hyprland 設定が `voice_input_paste` を公開していない環境では、従来どおり IME を一時的に無効にして `wtype` で打ち込む。
-6. 清書を適用した入力は、文字を返した後で別プロセスの評価モデルに渡す。評価待ちで文字入力を止めず、完了したら点数と判定段階を HUD に表示する。
+5. 辞書（後述）で置き換え、確認ダイアログに出す。`Esc` でやめた場合は何も貼らない。送信したら、前面のウィンドウが録音開始時と違えばそのウィンドウへフォーカスを戻す。閉じられていた場合は貼らずにクリップボードへコピーし、HUD で知らせる。
+6. Whisper の原文をクリップボードへコピーする。清書した場合は清書結果をコピーし直すので、原文は DMS のクリップボード履歴（`SUPER + CTRL + V`）に残る。次に `hyprctl eval 'voice_input_paste()'` で、`SUPER + V` と同じ貼り付けキー（端末は `Ctrl+Shift+V`、それ以外は `Ctrl+V`）を Hyprland から入力先へ送る。貼り付けは IME を通らないので、IME が有効でも長い文が崩れない。Hyprland 設定が `voice_input_paste` を公開していない環境では、従来どおり IME を一時的に無効にして `wtype` で打ち込む。
+7. ダイアログで直していれば、変わった語の組を学習候補に記録する（後述）。
+8. 清書を適用した入力は、文字を返した後で別プロセスの評価モデルに渡す。評価待ちで文字入力を止めず、完了したら点数と判定段階を HUD に表示する。
 
 録音した WAV は次の録音開始時まで残る。Whisper の原文は `transcript.txt`、清書に成功した結果は `transcript.cleaned.txt` に残る。変換の失敗内容は同じディレクトリの `gpu.log`、`cpu.log` または `cleanup.log` に残る。
+
+## 確認ダイアログ
+
+認識結果は `quickshell` のダイアログ（`voice-input-dialog.qml`、`deploy` で `${XDG_DATA_HOME:-$HOME/.local/share}/voice-input/` に入る）に出す。レイヤーシェルの面として画面中央に浮かび、キーボードを占有する。SKK で日本語を入力できる。
+
+| キー | 動作 |
+| --- | --- |
+| `Ctrl + Enter` | 送信して貼り付ける |
+| `Enter`、`C-j` | 改行（貼り付けなら改行もそのまま入る） |
+| `Esc` | 何も貼らずにやめる |
+| `C-f` `C-b` `C-n` `C-p` `C-a` `C-e` | 1文字・1行（折り返しも1行）・行頭・行末へ移動 |
+| `M-f` `M-b` `M-<` `M->` | 単語単位（文字の種類が変わるところ）・先頭・末尾へ移動 |
+| `C-d` `C-h` `M-d` `M-DEL` `C-k` | 1文字・単語・行末までを消す |
+| `C-SPC`（`C-@`）`C-w` `M-w` `C-y` `C-g` | マーク、切り取り、コピー、貼り付け、マーク解除 |
+| `C-/`（`C-_`） | 取り消し |
+
+`C-k` などで切り取った文字はダイアログ内だけで持ち、システムのクリップボードには入れない。切り取ったものがなければ `C-y` はクリップボードを貼る。SKK の変換中のキーは SKK に渡す。全部消して送信した場合はやめたのと同じ扱い。
+
+ダイアログを待つ間も `voice_input_typing` submap のままなので、`SUPER` のショートカットは効かない。`VOICE_INPUT_DIALOG=0` でダイアログを出さずに貼る。`qs` やダイアログのファイルがない場合や起動に失敗した場合も、そのまま貼る。履歴の `dialog_status` は `submitted` / `cancelled` / `target_lost` / `unavailable` / `disabled`、ダイアログに出した文は `shown_text`、貼った文は `output_text`、待ち時間は `dialog_ms`（`total_ms` には含めない）。
+
+## 辞書の自動学習
+
+ダイアログで直して送信すると、表示した文と送信した文を1文字ずつ `diff` で比べ、置き換えた部分を「誤 → 正」の組として学習候補 `${XDG_STATE_HOME:-$HOME/.local/state}/voice-input/dictionary-candidates.jsonl` に記録する。同じ組が2回（`VOICE_INPUT_DICT_PROMOTE` で変更）たまると、辞書 `${XDG_CONFIG_HOME:-$HOME/.config}/voice-input/dictionary.tsv` に入れて HUD で知らせる。辞書は次の音声入力から、清書の後・ダイアログの前に当てる（どの清書モードでも効く）。
+
+- 変わった部分は前後の漢字・カタカナ・英数字のまとまりまで広げる。「注出 → 抽出」は1文字ずつだと「注 → 抽」だが、それでは「注意」まで変わるため。
+- 1文字だけの組（「ね → よ」のような語尾の直し）、空白・改行・句読点を含む組、13文字以上の組は覚えない。
+- 書き換えた量が文の半分を超える場合は、言い換えとみなして何も覚えない。
+- 辞書は文脈を見ずに置き換える。「感じ → 漢字」のような組が入ると「いい感じ」まで変わるので、そうなったら消す。
+
+辞書は1行1組の `誤<TAB>正` で、`#` で始まる行と空行は無視する。手で編集してもよい。
+
+```sh
+voice-inputctl dict                 # 辞書と学習候補（回数）
+voice-inputctl dict add 議事禄 議事録  # 手で追加
+voice-inputctl dict rm 感じ          # 辞書と学習候補から消す
+```
 
 ## 清書オプション
 
@@ -95,6 +133,7 @@ jq -r '[.timestamp, .whisper_model, .llm_model, .cleanup_status, .whisper_ms, .c
 - 録音に `pw-record`、文字起こしにローカルの `whisper-server` を使う。GPU 側は `${XDG_DATA_HOME:-$HOME/.local/share}/whisper/ggml-medium-q8_0.bin`（`ggml-medium.bin` を `q8_0` に量子化したもの）、CPU への切替時は `ggml-small.bin` を使う。サーバーと CPU 版 CLI はパッケージ版の `/usr/bin/whisper-server` と `/usr/bin/whisper-cli`。
 - 出力音量の変更と復元には `wpctl` を使う。録音開始時の出力先と音量を保存するため、途中で既定の出力先を変更しても元の出力先へ戻す。
 - 清書にローカルの `llama-server` と `jq` を使う。サーバーが停止していても原文入力に戻る。
+- 確認ダイアログに `quickshell`（`qs`）を使う。学習の比較に `diff` を使う。
 - Whisper 原文のコピーと清書結果の入力に `wl-copy` と `hyprctl eval` を使う。貼り付けが使えない環境では `wtype` と `fcitx5-remote` を使う。
 
 ## CUDA 版 Whisper サーバー
@@ -213,7 +252,7 @@ make test
 
 ## 変更の反映
 
-このディレクトリのスクリプトを編集したら、`deploy` で3コマンドを `~/.local/bin/` に反映する。別の配置先を使う場合は引数で指定できる。
+このディレクトリのスクリプトを編集したら、`deploy` で3コマンドを `~/.local/bin/` に、確認ダイアログを `${XDG_DATA_HOME:-$HOME/.local/share}/voice-input/` に反映する。別の配置先を使う場合は引数で指定できる。
 
 ```sh
 ./deploy

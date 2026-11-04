@@ -16,4 +16,9 @@ install -m 755 -- \
   "$script_dir/voice-input-judge" \
   "$install_dir/"
 
+data_dir="${XDG_DATA_HOME:-$HOME/.local/share}/voice-input"
+mkdir -p -- "$data_dir"
+install -m 644 -- "$script_dir/voice-input-dialog.qml" "$data_dir/"
+
 printf 'Installed voice-input, voice-inputctl, voice-input-judge to %s\n' "$install_dir"
+printf 'Installed voice-input-dialog.qml to %s\n' "$data_dir"

@@ -21,6 +21,14 @@ setup() {
   : > "$XDG_DATA_HOME/whisper/ggml-small.bin"
   : > "$T/calls"
   echo reset > "$T/submap"
+  echo 0xabc > "$T/active-window"
+  export VOICE_INPUT_DIALOG_QML="$T/dialog.qml"
+  : > "$VOICE_INPUT_DIALOG_QML"
+  # submit: 表示した文（MOCK_DIALOG_TEXT があればその文）を送信、cancel: Esc、fail: 起動に失敗
+  export MOCK_DIALOG=submit
+  unset MOCK_DIALOG_TEXT
+  export MOCK_DIALOG_TEXT
+  export MOCK_FOCUS=ok
 
   # 既定の振る舞い。各テストで上書きする。
   export MOCK_VOLUME='Volume: 0.80'
@@ -58,7 +66,15 @@ case "$1" in
     case "$2" in
       *voice_input_typing*) echo voice_input_typing > "$T/submap" ;;
       *reset*) echo reset > "$T/submap" ;;
+      *'hl.dsp.focus({ window = "address:'*)
+        if [ "$MOCK_FOCUS" = ok ]; then
+          printf '%s\n' "$2" | sed 's/.*address:\(0x[0-9a-f]*\).*/\1/' > "$T/active-window"
+          echo ok
+        else
+          echo 'warning: =[C]:-1: hl.focus: window not found'
+        fi ;;
     esac ;;
+  activewindow) jq -n --arg address "$(cat "$T/active-window")" '{address: $address}' ;;
   submap) cat "$T/submap" ;;
   eval)
     echo "hyprctl eval $2" >> "$T/calls"
@@ -130,6 +146,20 @@ if [ "$MOCK_CLI" = oom ]; then
 fi
 printf '%s\n' "$MOCK_CPU_TEXT" > "$base.txt"
 EOF
+  mock qs <<'EOF'
+echo "qs $*" >> "$T/calls"
+cp "$VOICE_INPUT_DIALOG_IN" "$T/dialog-shown"
+case "$MOCK_DIALOG" in
+  submit)
+    if [ -n "${MOCK_DIALOG_TEXT+set}" ]; then
+      printf '%s' "$MOCK_DIALOG_TEXT" > "$VOICE_INPUT_DIALOG_OUT"
+    else
+      printf '%s' "$(cat "$VOICE_INPUT_DIALOG_IN")" > "$VOICE_INPUT_DIALOG_OUT"
+    fi ;;
+  cancel) : > "$VOICE_INPUT_DIALOG_CANCEL" ;;
+  fail) echo 'failed to connect to wayland' >&2; exit 1 ;;
+esac
+EOF
   mock wl-copy <<'EOF'
 echo wl-copy >> "$T/calls"
 cat > "$T/clipboard"
@@ -183,6 +213,7 @@ start_fake_recording() {
   echo "$recorder" > "$state/recording.pid"
   echo '42 0.80' > "$state/sink-volume"
   : > "$state/input.wav"
+  echo 0xabc > "$state/target-window"
 }
 
 called() {
@@ -376,6 +407,202 @@ EOF
   [ "$(cat "$T/typed")" = 'GPUの結果 ' ]
   called wtype
   ! called 'hyprctl eval voice_input_paste()' || false
+}
+
+@test "録音開始時に前面のウィンドウを貼り先として覚える" {
+  echo 0x1234 > "$T/active-window"
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$state/target-window")" = 0x1234 ]
+}
+
+@test "認識結果を確認ダイアログに出し、送信した文を貼る" {
+  MOCK_DIALOG_TEXT=$'GPUの結果を直した\n2行目'
+  start_fake_recording
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$T/dialog-shown")" = 'GPUの結果 ' ]
+  # 貼り付けなら改行もそのまま入る
+  [ "$(cat "$T/typed")" = $'GPUの結果を直した\n2行目' ]
+  [ "$(line_of "qs -p $VOICE_INPUT_DIALOG_QML")" -lt "$(line_of 'hyprctl eval voice_input_paste()')" ]
+  jq -e '.dialog_status == "submitted" and .shown_text == "GPUの結果 " and
+    .output_text == "GPUの結果を直した\n2行目" and (.dialog_ms | type == "number")' \
+    "$XDG_STATE_HOME/voice-input/history.jsonl"
+}
+
+@test "ダイアログを出す前に文字起こし中の表示を消す" {
+  start_fake_recording
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(line_of 'hud-status clear voice-input')" -lt "$(line_of "qs -p $VOICE_INPUT_DIALOG_QML")" ]
+}
+
+@test "ダイアログを Esc でやめたら何も貼らない" {
+  MOCK_DIALOG=cancel
+  start_fake_recording
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ ! -f "$T/typed" ]
+  ! called 'hyprctl eval voice_input_paste()' || false
+  ! called wtype || false
+  [ "$(cat "$T/submap")" = reset ]
+  jq -e '.dialog_status == "cancelled" and .output_text == ""' "$XDG_STATE_HOME/voice-input/history.jsonl"
+}
+
+@test "ダイアログで全部消して送信したら何も貼らない" {
+  MOCK_DIALOG_TEXT=''
+  start_fake_recording
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ ! -f "$T/typed" ]
+  [ "$(jq -r '.dialog_status' "$XDG_STATE_HOME/voice-input/history.jsonl")" = cancelled ]
+}
+
+@test "ダイアログが起動できなければ、そのまま貼る" {
+  MOCK_DIALOG=fail
+  start_fake_recording
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$T/typed")" = 'GPUの結果 ' ]
+  [ "$(jq -r '.dialog_status' "$XDG_STATE_HOME/voice-input/history.jsonl")" = unavailable ]
+}
+
+@test "VOICE_INPUT_DIALOG=0 ならダイアログを出さずに貼る" {
+  export VOICE_INPUT_DIALOG=0
+  start_fake_recording
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  ! grep -q '^qs ' "$T/calls" || false
+  [ "$(cat "$T/typed")" = 'GPUの結果 ' ]
+  [ "$(jq -r '.dialog_status' "$XDG_STATE_HOME/voice-input/history.jsonl")" = disabled ]
+}
+
+@test "前面のウィンドウが変わっていたら、録音を始めたウィンドウに戻してから貼る" {
+  start_fake_recording
+  echo 0xdef > "$T/active-window"
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  called 'hyprctl hl.dsp.focus({ window = "address:0xabc" })'
+  [ "$(line_of 'hyprctl hl.dsp.focus({ window = "address:0xabc" })')" -lt "$(line_of 'hyprctl eval voice_input_paste()')" ]
+  [ "$(cat "$T/typed")" = 'GPUの結果 ' ]
+}
+
+@test "録音を始めたウィンドウが閉じられていたら、貼らずにクリップボードに残す" {
+  MOCK_FOCUS=missing
+  MOCK_DIALOG_TEXT='直した文'
+  start_fake_recording
+  echo 0xdef > "$T/active-window"
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ ! -f "$T/typed" ]
+  [ "$(cat "$T/clipboard")" = '直した文' ]
+  called 'hud -s off --no-voice 音声入力: 元のウィンドウがないので、クリップボードにコピーしました'
+  [ "$(jq -r '.dialog_status' "$XDG_STATE_HOME/voice-input/history.jsonl")" = target_lost ]
+}
+
+@test "貼り先のアドレスがおかしければフォーカスを動かさない" {
+  start_fake_recording
+  echo '0xabc"); os.exit()--' > "$state/target-window"
+  echo 0xdef > "$T/active-window"
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  ! grep -q 'hl.dsp.focus' "$T/calls" || false
+}
+
+@test "ダイアログで直した語の組を学習候補に記録する" {
+  MOCK_GPU_TEXT='次は木字を作ってから本文を書きます。'
+  MOCK_DIALOG_TEXT='次は目次を作ってから本文を書きます。'
+  start_fake_recording
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  jq -e '.wrong == "木字" and .right == "目次" and (.timestamp | type == "string")' \
+    "$XDG_STATE_HOME/voice-input/dictionary-candidates.jsonl"
+  [ ! -f "$XDG_CONFIG_HOME/voice-input/dictionary.tsv" ]
+  jq -e '.learned == [{"wrong":"木字","right":"目次"}] and .promoted == []' \
+    "$XDG_STATE_HOME/voice-input/history.jsonl"
+}
+
+@test "変わった部分は前後の漢字のまとまりまで広げて覚える" {
+  MOCK_GPU_TEXT='注出した一行の文字数です。'
+  MOCK_DIALOG_TEXT='抽出した一行の文字数です。'
+  start_fake_recording
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  jq -e '.wrong == "注出" and .right == "抽出"' "$XDG_STATE_HOME/voice-input/dictionary-candidates.jsonl"
+}
+
+@test "1文字だけの直しや、書き換えの多い文は覚えない" {
+  MOCK_GPU_TEXT='それはいいですね。'
+  MOCK_DIALOG_TEXT='それはいいですよ。'
+  start_fake_recording
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ ! -s "$XDG_STATE_HOME/voice-input/dictionary-candidates.jsonl" ]
+
+  MOCK_GPU_TEXT='全然違う話をしているところです。'
+  MOCK_DIALOG_TEXT='まったく別の内容に書き換えた文章になりました。'
+  start_fake_recording
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ ! -s "$XDG_STATE_HOME/voice-input/dictionary-candidates.jsonl" ]
+}
+
+@test "同じ組を2回直したら辞書に入れ、次からは辞書で直してから表示する" {
+  MOCK_GPU_TEXT='次は木字を作ります。'
+  MOCK_DIALOG_TEXT='次は目次を作ります。'
+  start_fake_recording
+  run "$SCRIPT"
+  [ ! -f "$XDG_CONFIG_HOME/voice-input/dictionary.tsv" ]
+  start_fake_recording
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$XDG_CONFIG_HOME/voice-input/dictionary.tsv")" = $'木字\t目次' ]
+  called 'hud -s off --no-voice 音声入力: 辞書に追加 木字→目次'
+  [ "$(tail -n 1 "$XDG_STATE_HOME/voice-input/history.jsonl" | jq -c '.promoted')" = '[{"wrong":"木字","right":"目次"}]' ]
+
+  unset MOCK_DIALOG_TEXT
+  export MOCK_DIALOG_TEXT
+  MOCK_GPU_TEXT='木字の次に木字を書きます。'
+  start_fake_recording
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$T/dialog-shown")" = '目次の次に目次を書きます。 ' ]
+  [ "$(tail -n 1 "$XDG_STATE_HOME/voice-input/history.jsonl" | jq -c '.dictionary_fixes')" = '[{"wrong":"木字","right":"目次"}]' ]
+  # 辞書に入った組をもう一度辞書に足さない
+  [ "$(wc -l < "$XDG_CONFIG_HOME/voice-input/dictionary.tsv")" -eq 1 ]
+}
+
+@test "辞書の # で始まる行と空行は飛ばす" {
+  mkdir -p "$XDG_CONFIG_HOME/voice-input"
+  printf '# 木字\t目次\n\n本文\t論文\n' > "$XDG_CONFIG_HOME/voice-input/dictionary.tsv"
+  MOCK_GPU_TEXT='木字と本文'
+  start_fake_recording
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$T/dialog-shown")" = '木字と論文 ' ]
+}
+
+@test "voice-inputctl dict で辞書と学習候補を表示し、追加・削除する" {
+  mkdir -p "$XDG_STATE_HOME/voice-input"
+  printf '%s\n' '{"wrong":"木字","right":"目次","timestamp":"t"}' '{"wrong":"木字","right":"目次","timestamp":"t"}' \
+    '{"wrong":"本文","right":"論文","timestamp":"t"}' > "$XDG_STATE_HOME/voice-input/dictionary-candidates.jsonl"
+  run "$CTL" dict add 多数結 多数決
+  [ "$status" -eq 0 ]
+  run "$CTL" dict add 多数結 多数決
+  [ "$(cat "$XDG_CONFIG_HOME/voice-input/dictionary.tsv")" = $'多数結\t多数決' ]
+  run "$CTL" dict
+  [ "$status" -eq 0 ]
+  [[ $output == *'多数結 → 多数決'* ]]
+  [[ $output == *'2回  木字 → 目次'* ]]
+  [[ $output == *'1回  本文 → 論文'* ]]
+  run "$CTL" dict rm 多数結
+  [ ! -s "$XDG_CONFIG_HOME/voice-input/dictionary.tsv" ]
+  run "$CTL" dict rm 木字
+  [ "$status" -eq 0 ]
+  ! grep -q 木字 "$XDG_STATE_HOME/voice-input/dictionary-candidates.jsonl" || false
+  grep -q 本文 "$XDG_STATE_HOME/voice-input/dictionary-candidates.jsonl"
+  run "$CTL" dict add $'a\tb' c
+  [ "$status" -eq 2 ]
 }
 
 @test "改行は空白にし、- で始まる文もそのまま入力する" {

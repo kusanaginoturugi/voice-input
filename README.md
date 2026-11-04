@@ -34,7 +34,7 @@
 
 `C-k` などで切り取った文字はダイアログ内だけで持ち、システムのクリップボードには入れない。切り取ったものがなければ `C-y` はクリップボードを貼る。SKK の変換中は `Esc` と `Ctrl + Enter` も含めてキーを SKK に渡す。ダイアログはフォーカス中のモニターに出す。全部消して送信した場合はやめたのと同じ扱い。
 
-ダイアログを待つ間も `voice_input_typing` submap のままなので、`SUPER` のショートカットは効かない。`VOICE_INPUT_DIALOG=0` でダイアログを出さずに貼る。`qs` やダイアログのファイルがない場合や起動に失敗した場合も、そのまま貼る。履歴の `dialog_status` は `submitted` / `cancelled` / `target_lost` / `unavailable` / `disabled`、ダイアログに出した文は `shown_text`、貼った文は `output_text`、待ち時間は `dialog_ms`（`total_ms` には含めない）。
+ダイアログを待つ間も `voice_input_typing` submap のままなので、`SUPER` のショートカットは効かない。ダイアログが閉じなくなったら `F12` で閉じられる（submap も戻る）。30分（`VOICE_INPUT_DIALOG_TIMEOUT` 秒）たつと自動で閉じる。どちらの場合も何も貼らない。`VOICE_INPUT_DIALOG=0` でダイアログを出さずに貼る。`qs` やダイアログのファイルがない場合や起動に失敗した場合も、そのまま貼る。履歴の `dialog_status` は `submitted` / `cancelled` / `target_lost` / `unavailable` / `disabled`、ダイアログに出した文は `shown_text`、貼った文は `output_text`、待ち時間は `dialog_ms`（`total_ms` には含めない）。
 
 ## 辞書の自動学習
 
@@ -196,8 +196,14 @@ cmake --build ~/src/whisper.cpp/build-cuda -j 4
 ```lua
 voice_input_paste = universal_paste
 
+-- 音声入力が止まったときの非常口。確認ダイアログを閉じて submap を戻す（voice-input は何も貼らない）
+local function exit_voice_input_typing()
+  hl.dispatch(hl.dsp.exec_cmd("pkill -f voice-input-dialog.qml"))
+  hl.dispatch(hl.dsp.submap("reset"))
+end
+
 hl.define_submap("voice_input_typing", function()
-  hl.bind("F12", hl.dsp.submap("reset"), { description = "Exit voice input typing" })
+  hl.bind("F12", exit_voice_input_typing, { description = "Exit voice input typing" })
 end)
 ```
 

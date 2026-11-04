@@ -158,6 +158,8 @@ case "$MOCK_DIALOG" in
     fi ;;
   cancel) : > "$VOICE_INPUT_DIALOG_CANCEL" ;;
   fail) echo 'failed to connect to wayland' >&2; exit 1 ;;
+  killed) exit 143 ;;
+  hang) exec sleep 30 ;;
 esac
 EOF
   mock wl-copy <<'EOF'
@@ -447,6 +449,25 @@ EOF
   ! called wtype || false
   [ "$(cat "$T/submap")" = reset ]
   jq -e '.dialog_status == "cancelled" and .output_text == ""' "$XDG_STATE_HOME/voice-input/history.jsonl"
+}
+
+@test "ダイアログを F12 などで終了させられたら何も貼らない" {
+  MOCK_DIALOG=killed
+  start_fake_recording
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ ! -f "$T/typed" ]
+  [ "$(jq -r '.dialog_status' "$XDG_STATE_HOME/voice-input/history.jsonl")" = cancelled ]
+}
+
+@test "ダイアログは時間切れで閉じ、何も貼らない" {
+  export VOICE_INPUT_DIALOG_TIMEOUT=0.2
+  MOCK_DIALOG=hang
+  start_fake_recording
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ ! -f "$T/typed" ]
+  [ "$(jq -r '.dialog_status' "$XDG_STATE_HOME/voice-input/history.jsonl")" = cancelled ]
 }
 
 @test "ダイアログで全部消して送信したら何も貼らない" {

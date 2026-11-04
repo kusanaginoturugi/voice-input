@@ -1,7 +1,8 @@
 // voice-input の確認ダイアログ。認識結果を直してから貼り付けるために使う。
 // Enter は改行、Ctrl+Enter で送信、Esc で何も貼らずにやめる。Emacs の基本的なキーバインドで編集できる。
 // VOICE_INPUT_DIALOG_IN の文を表示し、送信したら VOICE_INPUT_DIALOG_OUT に書いて終わる。
-// やめたときは VOICE_INPUT_DIALOG_CANCEL を作って終わる。どちらもなければ、起動か保存に失敗している。
+// やめたとき（全部消して送信したときも）は VOICE_INPUT_DIALOG_CANCEL を作って終わる。
+// どちらもなければ、起動か保存に失敗している。
 import QtQuick
 import QtQuick.Controls
 import Quickshell
@@ -101,6 +102,22 @@ ShellRoot {
         preload: false
         onSaved: Qt.quit()
         onSaveFailed: Qt.exit(1)
+    }
+
+    // FileView は中身が変わらない書き込み（空文字など）を省いて onSaved を出さないので、空では書かない。
+    // それでも閉じられなかったときのために、1秒後に必ず終わる
+    function finish(textToSubmit) {
+        if (textToSubmit === "")
+            cancelled.setText("cancel\n")
+        else
+            output.setText(textToSubmit)
+        exitTimer.start()
+    }
+
+    Timer {
+        id: exitTimer
+        interval: 1000
+        onTriggered: Qt.exit(1)
     }
 
     PanelWindow {
@@ -298,12 +315,12 @@ ShellRoot {
                                 return
                             if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
                                     && (event.modifiers & Qt.ControlModifier)) {
-                                output.setText(text)
+                                root.finish(text)
                                 event.accepted = true
                                 return
                             }
                             if (event.key === Qt.Key_Escape) {
-                                cancelled.setText("")
+                                root.finish("")
                                 event.accepted = true
                                 return
                             }

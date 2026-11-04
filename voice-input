@@ -36,6 +36,7 @@ dialog_qml="${VOICE_INPUT_DIALOG_QML:-${XDG_DATA_HOME:-$HOME/.local/share}/voice
 dictionary_file="${XDG_CONFIG_HOME:-$HOME/.config}/voice-input/dictionary.tsv"
 candidates_file="$log_dir/dictionary-candidates.jsonl"
 promote_count="${VOICE_INPUT_DICT_PROMOTE:-2}"
+dialog_timeout="${VOICE_INPUT_DIALOG_TIMEOUT:-1800}"
 
 restore_volume() {
   if [ -f "$volume_file" ]; then
@@ -218,22 +219,28 @@ $pairs
 EOF
 }
 
-# 確認ダイアログで直してもらう。送信なら edited に入れて 0、やめたら 1、ダイアログを使えなければ 2
+# 確認ダイアログで直してもらう。送信なら edited に入れて 0、やめたら 1、ダイアログを使えなければ 2。
+# 30分で閉じる。時間切れや F12 で閉じられたときも、やめたものとして何も貼らない
 edit_in_dialog() {
   if [ "$dialog_enabled" != 1 ] || [ ! -r "$dialog_qml" ] || ! command -v qs >/dev/null 2>&1; then
     return 2
   fi
   rm -f "$state_dir/dialog-out.txt" "$state_dir/dialog-cancel"
   printf '%s\n' "$1" > "$state_dir/dialog-in.txt"
+  dialog_rc=0
   VOICE_INPUT_DIALOG_IN="$state_dir/dialog-in.txt" \
     VOICE_INPUT_DIALOG_OUT="$state_dir/dialog-out.txt" \
     VOICE_INPUT_DIALOG_CANCEL="$state_dir/dialog-cancel" \
-    qs -p "$dialog_qml" >"$state_dir/dialog.log" 2>&1 || true
+    timeout "$dialog_timeout" qs -p "$dialog_qml" >"$state_dir/dialog.log" 2>&1 || dialog_rc=$?
   if [ -f "$state_dir/dialog-out.txt" ]; then
     edited=$(cat "$state_dir/dialog-out.txt")
     return 0
   fi
   [ ! -f "$state_dir/dialog-cancel" ] || return 1
+  # 124: 時間切れ、143: F12 などで終了させられた
+  case "$dialog_rc" in
+    124|143) return 1 ;;
+  esac
   return 2
 }
 
